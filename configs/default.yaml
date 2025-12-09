@@ -5,7 +5,7 @@ defaults:
   - override hydra/hydra_logging: none
   - override hydra/job_logging: disabled
 
-ray: false
+ray: true
 prefilter: false
 
 hydra:

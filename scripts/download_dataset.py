@@ -28,11 +28,10 @@ import pandas as pd
 from huggingface_hub import HfApi
 
 
-def download_clips_from_url(
-    url: str, clips_timestamps: list[tuple[str, str]], output_paths: list[Path], cookies_from_browser: bool = False
-):
+def download_clips_from_url(                
+    url: str, clips_timestamps: list[tuple[str, str]], output_paths: list[Path], cookie_file: str = "/lustre/fs12/portfolios/nvr/projects/nvr_elm_llm/users/haozhu/projects/vipe/cookies.txt"    # Changed this                
+):                
     import datetime
-
     import ffmpeg
     import yt_dlp
 
@@ -50,8 +49,11 @@ def download_clips_from_url(
             "quiet": True,
             "no_warnings": True,
         }
-        if cookies_from_browser:
-            ydl_opts["cookiesfrombrowser"] = ("chrome",)
+        # if cookies_from_browser:
+        #     ydl_opts["cookiesfrombrowser"] = ("chrome",)
+        
+        if cookie_file:
+            ydl_opts["cookiefile"] = cookie_file
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download(url)
@@ -67,6 +69,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--prefix", type=str, required=True, help="Prefix of the dataset to be downloaded")
     parser.add_argument("--output_base", type=str, required=True, help="Base directory to save the dataset")
+    parser.add_argument("--nocam", action="store_true", help="No camera (intrinsics & poses) to be downloaded")
     parser.add_argument("--rgb", action="store_true", help="Download RGB components of the videos")
     parser.add_argument("--depth", action="store_true", help="Download depth components of the videos")
 
@@ -75,6 +78,8 @@ def main():
     output_base.mkdir(parents=True, exist_ok=True)
 
     attributes_to_download = ["intrinsics", "pose"]
+    if args.nocam:
+        attributes_to_download = []
     if args.rgb:
         attributes_to_download.append("rgb")
     if args.depth:
@@ -139,7 +144,7 @@ def main():
                             link,
                             time_slices,
                             download_links,
-                            cookies_from_browser=True,
+                            # cookies_from_browser=True,
                         )
 
                 elif attribute == "rgb" and args.prefix.startswith("w360"):

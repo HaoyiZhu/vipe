@@ -6,7 +6,7 @@ channels:
 dependencies:
   - python=3.10
   - pip
-  - cuda-nvcc
+  - cuda-nvcc=12.8
   - eigen
   - zlib
   - libcusparse-dev

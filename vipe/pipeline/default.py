@@ -54,6 +54,13 @@ class DefaultAnnotationPipeline(Pipeline):
         self.out_path.mkdir(exist_ok=True, parents=True)
         self.camera_type = CameraType(self.init_cfg.camera_type)
 
+    def should_filter(self, stream_name: str) -> bool:
+        if self.out_cfg.get("skip_exists", False):
+            artifact_path = io.ArtifactPath(self.out_path, stream_name)
+            if artifact_path.meta_info_path.exists():
+                return True
+        return False
+    
     def _add_init_processors(self, video_stream: VideoStream) -> ProcessedVideoStream:
         init_processors: list[StreamProcessor] = []
 

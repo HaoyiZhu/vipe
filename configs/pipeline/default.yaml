@@ -33,15 +33,15 @@ post:
 output:
   # Path to save results
   path: vipe_results/
-  skip_exists: false
+  skip_exists: true
 
   # Save artifacts and a info file
-  save_artifacts: false
+  save_artifacts: true
 
   # Save reconstruction from SLAM
   save_slam_map: false
 
   # Visualization videos to BASE_PATH/vipe/xxx.mp4
   save_viz: true
-  viz_downsample: 2
+  viz_downsample: 4
   viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]
