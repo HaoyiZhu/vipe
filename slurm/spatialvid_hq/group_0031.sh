@@ -4,10 +4,10 @@
 #SBATCH -t 04:00:00
 #SBATCH -N 1
 #SBATCH --gpus-per-node 8
-#SBATCH --array=1-20%1
-#SBATCH -J VIPE:SpatialVID-HQ-group_0001
-#SBATCH -o logs/vipe_%A_%a.out
-#SBATCH -e logs/vipe_%A_%a.err
+#SBATCH --array=1-15%1
+#SBATCH -J VIPE:SpatialVID-HQ-group_0031
+#SBATCH -o logs/vipe_group_0031_%A_%a.out
+#SBATCH -e logs/vipe_group_0031_%A_%a.err
 #SBATCH --exclusive
 
 # --- 1. Environment Setup ---
@@ -37,35 +37,39 @@ ip_head=$head_node_ip:$port
 export ip_head
 echo "Head node IP: $ip_head"
 
-# Start Head
+# Start Head Node
+echo "Starting Head on $head_node"
+# Note: We use --block in background (&) so it stays alive but returns control
 srun --nodes=1 --ntasks=1 -w "$head_node" \
     ray start --head --node-ip-address="$head_node_ip" --port=$port \
     --temp-dir="$RAY_TMPDIR" --block & 
 
-sleep 10
+sleep 10 # Wait for head to initialize
 
-# Start Workers
+# Start Worker Nodes (if -N > 1)
 worker_num=$((SLURM_JOB_NUM_NODES - 1))
 if [ $worker_num -gt 0 ]; then
+    echo "Starting $worker_num Worker nodes"
     for ((i=1; i<=worker_num; i++)); do
         node_i=${nodes_array[$i]}
+        echo "Starting Worker on $node_i"
         srun --nodes=1 --ntasks=1 -w "$node_i" \
              ray start --address "$ip_head" \
              --temp-dir="$RAY_TMPDIR" --block &
     done
-    sleep 10
+    sleep 10 # Wait for workers to connect
 fi
 
 # --- 3. Run Inference ---
-echo "Starting Inference..."
+echo "Cluster ready. Starting Inference Script..."
 
 # Paths
-BASE_VIDEO_PATH="$MYHOME/data/SpatialVID-HQ/videos/group_0001/"
-OUTPUT_PATH="$MYHOME/data/SpatialVID-HQ/vipe_results/group_0001/"
+BASE_VIDEO_PATH="$MYHOME/data/SpatialVID-HQ/videos/group_0031/"
+OUTPUT_PATH="$MYHOME/data/SpatialVID-HQ/vipe_results/group_0031/"
 
 cmd="python run_ray.py \
-    +ray=true \
-    +prefilter=false \
+    ray=true \
+    prefilter=true \
     pipeline=default \
     streams=raw_mp4_stream \
     streams.frame_end=-1 \

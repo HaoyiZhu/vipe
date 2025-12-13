@@ -1,0 +1,42 @@
+Setting up Ray Cluster...
+Head node IP: 10.49.162.38:6379
+Starting Head on batch-block7-00117
+Cluster ready. Starting Inference Script...
+Executing: python run_ray.py     ray=true     prefilter=false     pipeline=default     streams=raw_mp4_stream     streams.frame_end=-1     streams.base_path=/lustre/fs12/portfolios/nvr/projects/nvr_elm_llm/users/haozhu/data/SpatialVID-HQ/videos/group_0007/     pipeline.output.path=/lustre/fs12/portfolios/nvr/projects/nvr_elm_llm/users/haozhu/data/SpatialVID-HQ/vipe_results/group_0007/
+2025-12-11 21:58:51,652	INFO usage_lib.py:467 -- Usage stats collection is enabled by default without user confirmation because this terminal is detected to be non-interactive. To disable this, add `--disable-usage-stats` to the command that starts the cluster, or run the following command: `ray disable-usage-stats` before starting the cluster. See https://docs.ray.io/en/master/cluster/usage-stats.html for more details.
+2025-12-11 21:58:51,653	INFO scripts.py:865 -- [37mLocal node IP[39m: [1m10.49.162.38[22m
+2025-12-11 21:58:57,988	SUCC scripts.py:902 -- [32m--------------------[39m
+2025-12-11 21:58:57,989	SUCC scripts.py:903 -- [32mRay runtime started.[39m
+2025-12-11 21:58:57,989	SUCC scripts.py:904 -- [32m--------------------[39m
+2025-12-11 21:58:57,989	INFO scripts.py:906 -- [36mNext steps[39m
+2025-12-11 21:58:57,989	INFO scripts.py:909 -- To add another node to this Ray cluster, run
+2025-12-11 21:58:57,989	INFO scripts.py:912 -- [1m  ray start --address='10.49.162.38:6379'[22m
+2025-12-11 21:58:57,989	INFO scripts.py:921 -- To connect to this Ray cluster:
+2025-12-11 21:58:57,989	INFO scripts.py:923 -- [35mimport[39m[26m ray
+2025-12-11 21:58:57,989	INFO scripts.py:924 -- ray[35m.[39m[26minit(_node_ip_address[35m=[39m[26m[33m'10.49.162.38'[39m[26m)
+2025-12-11 21:58:57,989	INFO scripts.py:936 -- To submit a Ray job using the Ray Jobs CLI:
+2025-12-11 21:58:57,989	INFO scripts.py:937 -- [1m  RAY_ADDRESS='http://127.0.0.1:8265' ray job submit --working-dir . -- python my_script.py[22m
+2025-12-11 21:58:57,989	INFO scripts.py:946 -- See https://docs.ray.io/en/latest/cluster/running-applications/job-submission/index.html 
+2025-12-11 21:58:57,989	INFO scripts.py:950 -- for more information on submitting Ray jobs to the Ray cluster.
+2025-12-11 21:58:57,989	INFO scripts.py:955 -- To terminate the Ray runtime, run
+2025-12-11 21:58:57,989	INFO scripts.py:956 -- [1m  ray stop[22m
+2025-12-11 21:58:57,989	INFO scripts.py:959 -- To view the status of the cluster, use
+2025-12-11 21:58:57,989	INFO scripts.py:960 --   [1mray status[22m[26m
+2025-12-11 21:58:57,989	INFO scripts.py:964 -- To monitor and debug Ray, view the dashboard at 
+2025-12-11 21:58:57,989	INFO scripts.py:965 --   [1m127.0.0.1:8265[22m[26m
+2025-12-11 21:58:57,989	INFO scripts.py:972 -- [4mIf connection to the dashboard fails, check your firewall settings and network configuration.[24m
+2025-12-11 21:58:57,989	INFO scripts.py:1076 -- [36m[1m--block[22m[39m
+2025-12-11 21:58:57,989	INFO scripts.py:1077 -- This command will now block forever until terminated by a signal.
+2025-12-11 21:58:57,989	INFO scripts.py:1080 -- Running subprocesses are monitored and a message will be printed if any of them terminate unexpectedly. Subprocesses exit with SIGTERM will be treated as graceful, thus NOT reported.
+          Ray Cluster Info          
+┏━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━┓
+┃ Key             ┃ Value          ┃
+┡━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━┩
+│ Node IP Address │ 10.49.162.38   │
+│ Dashboard URL   │ 127.0.0.1:8265 │
+│ Python Version  │ 3.10.19        │
+│ Ray Version     │ 2.42.1         │
+│ GPUs Available  │ 8.0            │
+│ CPUs Available  │ 255.0          │
+└─────────────────┴────────────────┘
+Submitting 5000 jobs to Ray...
