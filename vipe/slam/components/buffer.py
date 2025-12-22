@@ -177,6 +177,9 @@ class GraphBuffer:
 
         # Used to store the intrinsics used to compute the sensor depth.
         self.last_depth_intrinsics: torch.Tensor | None = None
+        
+        # Store the last BA residual
+        self.ba_residual: float = 0.0
 
     @property
     def flattened_disps(self):
@@ -521,6 +524,17 @@ class GraphBuffer:
 
         if verbose:
             logger.info(f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]}")
+
+        if len(ba_energy) > 0:
+            # We normalize the energy by the total number of pixels to make it independent of the image size.
+            # ba_energy is roughly sum(w * (p - t)^2)
+            # The weight w is roughly (8.0 / (2 * 0.25))^2 ~ 256
+            # So sqrt(ba_energy / N) / 16 ~ pixel error.
+            # N = num_edges * H * W
+            total_elements = target.numel() / 2
+            self.ba_residual = np.sqrt(ba_energy[-1] / (total_elements + 1e-6)) / 16.0
+            if verbose:
+                logger.info(f"BA residual: {self.ba_residual}")
 
         self.disps.clamp_(min=0.001)
 

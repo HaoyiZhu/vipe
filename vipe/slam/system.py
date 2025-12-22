@@ -317,4 +317,5 @@ class SLAMSystem:
             intrinsics=original_intrinsics,
             rig=SE3(self.buffer.rig.clone()),
             slam_map=slam_map,
+            ba_residual=self.buffer.ba_residual,
         )
