@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Define the range of group IDs you want to generate (0009 to 0072)
-START_ID=2
-END_ID=72
+START_ID=73
+END_ID=74
 
 # Loop through the desired IDs
 for i in $(seq $START_ID $END_ID); do
