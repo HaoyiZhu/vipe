@@ -16,20 +16,18 @@
 import copy
 import importlib
 import logging
-
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable, Iterator, Protocol
 
+import numpy as np
 import torch
-
 from omegaconf import DictConfig
 from torch.utils.data import IterableDataset
 
 from vipe.ext.lietorch import SE3
 from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
-
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +260,24 @@ class VideoFrame:
                     sky_mask |= self.instance == instance_id
         return sky_mask
 
+    def dav3_conditions(self) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
+        dav3_rgb = (self.rgb.cpu().numpy() * 255).astype(np.uint8)
+        dav3_ext = None
+        if self.pose is not None:
+            dav3_ext = self.pose.inv().matrix().cpu().numpy()
+        dav3_int = None
+        if self.intrinsics is not None:
+            assert self.camera_type == CameraType.PINHOLE
+            fx, fy, cx, cy = self.intrinsics.cpu().numpy()
+            dav3_int = np.array(
+                [
+                    [fx, 0, cx],
+                    [0, fy, cy],
+                    [0, 0, 1],
+                ]
+            )
+        return dav3_rgb, dav3_ext, dav3_int
+
 
 class VideoStream(IterableDataset[VideoFrame]):
     """
@@ -404,6 +420,8 @@ class StreamProcessor(Protocol):
     Interface of a stream processor that processes each video frame.
     """
 
+    n_passes_required: int = 1
+    
     def update_fps(self, previous_fps: float) -> float:
         return previous_fps
 
@@ -413,7 +431,7 @@ class StreamProcessor(Protocol):
     def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
         return previous_attributes
 
-    def update_iterator(self, previous_iterator: Iterator[VideoFrame]) -> Iterator[VideoFrame]:
+    def update_iterator(self, previous_iterator: Iterator[VideoFrame], pass_idx: int) -> Iterator[VideoFrame]:
         for frame_idx, frame in enumerate(previous_iterator):
             yield self(frame_idx, frame)
 
@@ -442,6 +460,7 @@ class ProcessedVideoStream(VideoStream):
         super().__init__()
         self.stream = stream
         self.processors = processors
+        self.n_passes_required = max(processor.n_passes_required for processor in processors) if processors else 1
 
     def frame_size(self) -> tuple[int, int]:
         frame_size = self.stream.frame_size()
@@ -473,13 +492,22 @@ class ProcessedVideoStream(VideoStream):
 
         return vs
 
+    def _build_iterator(self, pass_idx: int) -> Iterator[VideoFrame]:
+        iterator = iter(self.stream)
+        for processor in self.processors:
+            iterator = processor.update_iterator(iterator, pass_idx)
+        return iterator
+
     def __len__(self) -> int:
         return len(self.stream)
 
     def __iter__(self):
-        iterator = iter(self.stream)
-        for processor in self.processors:
-            iterator = processor.update_iterator(iterator)
+        for pass_idx in range(self.n_passes_required):
+            iterator = self._build_iterator(pass_idx)
+            # Iterate through the processors to update internal state.
+            if pass_idx != self.n_passes_required - 1:
+                for _ in pbar(iterator, desc=f"Pre-iterating for pass {pass_idx}"):
+                    pass
         return iterator
 
 

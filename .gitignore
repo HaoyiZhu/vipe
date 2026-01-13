@@ -170,3 +170,5 @@ JIAHUI.md
 csrc/include/
 logs/
 core.*
+slurm/sana_video/
+*.mp4

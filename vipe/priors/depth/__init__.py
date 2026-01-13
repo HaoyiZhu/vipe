@@ -37,5 +37,10 @@ def make_depth_model(model: str):
 
         return MogeModel()
 
+    elif model_name == "dav3":
+        from .dav3 import DepthAnything3Model
+
+        return DepthAnything3Model()
+
     else:
         raise ValueError(f"Unknown depth model: {model}")

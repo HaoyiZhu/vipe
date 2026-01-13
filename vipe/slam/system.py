@@ -23,9 +23,10 @@ from omegaconf import DictConfig, OmegaConf
 
 from vipe.ext.lietorch import SE3
 from vipe.priors.depth import make_depth_model
-from vipe.priors.depth.base import DepthType
 from vipe.priors.depth.adapter import PinholeDepthAdapter
-from vipe.streams.base import FrameAttribute, ProcessedVideoStream, StreamProcessor, VideoFrame, VideoStream
+from vipe.priors.depth.base import DepthType
+from vipe.streams.base import (FrameAttribute, ProcessedVideoStream,
+                               StreamProcessor, VideoFrame, VideoStream)
 from vipe.utils.cameras import CameraType
 from vipe.utils.logging import pbar
 from vipe.utils.misc import unpack_optional
@@ -306,6 +307,7 @@ class SLAMSystem:
             self._log_final(video_streams, filled_return)
 
         slam_map = self.buffer.extract_slam_map(filter_thresh=self.config.map_filter_thresh)
+        slam_map.backend_graph = self.backend.last_graph
 
         # Scale back the intrinsics to the original size.
         original_intrinsics = torch.stack(

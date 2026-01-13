@@ -1,6 +1,0 @@
-Could not append to config. An item is already at 'ray'.
-Either remove + prefix: 'ray=true'
-Or add a second + to add or override 'ray': '++ray=true'
-
-
-Set the environment variable HYDRA_FULL_ERROR=1 for a complete stack trace.

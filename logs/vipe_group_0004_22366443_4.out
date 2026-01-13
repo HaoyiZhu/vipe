@@ -1,6 +1,0 @@
-Setting up Ray Cluster...
-Head node IP: 10.49.164.138:6379
-Starting Head on batch-block4-2011
-Cluster ready. Starting Inference Script...
-Executing: python run_ray.py     +ray=true     +prefilter=false     pipeline=default     streams=raw_mp4_stream     streams.frame_end=-1     streams.base_path=/lustre/fs12/portfolios/nvr/projects/nvr_elm_llm/users/haozhu/data/SpatialVID-HQ/videos/group_0004/     pipeline.output.path=/lustre/fs12/portfolios/nvr/projects/nvr_elm_llm/users/haozhu/data/SpatialVID-HQ/vipe_results/group_0004/
-Inference exited with code 1.
