@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -35,6 +36,7 @@ class SLAMMap:
     # Actual frame indices of the dense_disp_xyz (assert sorted)
     dense_disp_frame_inds: list[int]
     # (Q, 2) keyframe graphs (index into dense_disp_frame_inds)
+    backend_graph: torch.Tensor | None = None
 
     def scale(self, factor: float):
         self.dense_disp_xyz *= factor
@@ -193,6 +195,8 @@ class SLAMOutput:
     # Residual of BA (unit is pixel/diagonal) -- average num of pixels/diagonal between predicted and observed flows
     # Should be of range [0, 1]
     ba_residual: float = 0.0
+
+    metrics: dict[str, Any] = field(default_factory=dict)
 
     @property
     def keyframe_ids(self) -> np.ndarray:

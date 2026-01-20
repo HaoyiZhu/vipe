@@ -44,9 +44,15 @@ map_filter_thresh: 0.05
 visualize: false
 # Use keyframe depth for recovering metric depth
 keyframe_depth: metric3d-small
+# Sparse tracks: minimum frame gap to add long-range edges
+sparse_tracks_min_gap: 50
+# Sparse tracks: maximum number of long-range edges to add
+sparse_tracks_max_edges: 100
 
 ba:
   dense_disp_alpha: 0.001
+  # Frame gap threshold: edges with gap >= this use sparse tracks more, dense flow less
+  sparse_tracks_gap_thresh: 10
 
 sparse_tracks:
   name: dummy

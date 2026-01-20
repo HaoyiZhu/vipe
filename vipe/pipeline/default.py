@@ -42,6 +42,10 @@ from .processors import (
     GeoCalibIntrinsicsProcessor,
     MultiviewDepthProcessor,
     TrackAnythingProcessor,
+    Pi3XVOInitPoseProcessor,
+    Pi3XMoGeProcessor,
+    Pi3XMoGePerFrameProcessor,
+    Pi3XAdaptiveDepthProcessor,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +88,21 @@ class DefaultAnnotationPipeline(Pipeline):
                     sam_run_gap=int(video_stream.fps() * self.init_cfg.instance.kf_gap_sec),
                 )
             )
+        if (pose_init_cfg := self.init_cfg.get("pose_init", None)) is not None:
+            if pose_init_cfg.get("name", "pi3x_vo") == "pi3x_vo" and pose_init_cfg.get("enabled", True):
+                init_processors.append(
+                    Pi3XVOInitPoseProcessor(
+                        video_stream,
+                        model=pose_init_cfg.get("model", "yyfz233/Pi3X"),
+                        chunk_size=pose_init_cfg.get("chunk_size", 16),
+                        overlap=pose_init_cfg.get("overlap", 6),
+                        conf_thre=pose_init_cfg.get("conf_thre", 0.05),
+                        dtype=pose_init_cfg.get("dtype", "bf16"),
+                        pose_convention=pose_init_cfg.get("pose_convention", "c2w"),
+                        return_depth=pose_init_cfg.get("with_depth", False),
+                        depth_conf_thre=pose_init_cfg.get("depth_conf_thre", None),
+                    )
+                )
         return ProcessedVideoStream(video_stream, init_processors)
 
     def _add_post_processors(
@@ -98,10 +117,48 @@ class DefaultAnnotationPipeline(Pipeline):
             )
         ]
         if (depth_align_model := self.post_cfg.depth_align_model) is not None:
-            if depth_align_model.startswith("mvd_"):
+            if depth_align_model == "pi3x_moge":
+                post_processors.append(
+                    Pi3XMoGeProcessor(
+                        slam_output,
+                        window_size=self.post_cfg.get("window_size", 100),
+                        overlap_size=self.post_cfg.get("overlap_size", 20),
+                        pixel_limit=self.post_cfg.get("pixel_limit", 255000),
+                    )
+                )
+            elif depth_align_model == "pi3x_moge_perframe":
+                post_processors.append(
+                    Pi3XMoGePerFrameProcessor(
+                        slam_output,
+                        view_idx=view_idx,
+                        window_size=self.post_cfg.get("window_size", 64),
+                        overlap_size=self.post_cfg.get("overlap_size", 16),
+                        pixel_limit=self.post_cfg.get("pixel_limit", 255000),
+                        align_lr_size=self.post_cfg.get("align_lr_size", 64),
+                        min_align_points=self.post_cfg.get("min_align_points", 200),
+                        moge_bs=self.post_cfg.get("moge_bs", 4),
+                        align_source=self.post_cfg.get("align_source", "moge2"),
+                    )
+                )
+            elif depth_align_model == "adaptive_pi3x":
+                post_processors.append(
+                    Pi3XAdaptiveDepthProcessor(
+                        slam_output,
+                        view_idx=view_idx,
+                        metric_model=self.post_cfg.get("metric_model", "unidepth-l"),
+                        pixel_limit=self.post_cfg.get("pixel_limit", 255000),
+                        batch_size=self.post_cfg.get("batch_size", 4),
+                        # window_size=self.post_cfg.get("window_size", 32),
+                        # overlap_size=self.post_cfg.get("overlap_size", 10),
+                        # interp_len=self.post_cfg.get("interp_len", 8),
+                        # window_align=self.post_cfg.get("window_align", True),
+                    )
+                )
+            elif depth_align_model.startswith("mvd_"):
                 post_processors.append(MultiviewDepthProcessor(slam_output, model=depth_align_model))
             else:
                 post_processors.append(AdaptiveDepthProcessor(slam_output, view_idx, depth_align_model))
+
         return ProcessedVideoStream(video_stream, post_processors)
 
     def run(self, video_data: VideoStream | MultiviewVideoList) -> AnnotationPipelineOutput:
@@ -129,6 +186,21 @@ class DefaultAnnotationPipeline(Pipeline):
         slam_pipeline = SLAMSystem(device=torch.device("cuda"), config=self.slam_cfg)
         slam_output = slam_pipeline.run(slam_streams, rig=slam_rig, camera_type=self.camera_type)
 
+        # Optional: save raw SLAM outputs (poses/intrinsics) before any post-processing,
+        # to help debug trajectory differences across post depth processors / configs.
+        if self.out_cfg.get("save_slam_intermediate", False):
+            for view_idx, artifact_path in enumerate(artifact_paths):
+                try:
+                    io.save_slam_intermediate_artifacts(artifact_path, slam_output, view_idx=view_idx)
+                except Exception:
+                    logger.exception("Failed saving intermediate SLAM artifacts for view_idx=%d", view_idx)
+
+        # Clean up SLAM system to free GPU memory for post-processing
+        del slam_pipeline
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+
         if self.return_payload:
             annotate_output.payload = slam_output
             return annotate_output
@@ -145,7 +217,8 @@ class DefaultAnnotationPipeline(Pipeline):
                 logger.info(f"Saving artifacts to {artifact_path}")
                 io.save_artifacts(artifact_path, output_stream)
                 with artifact_path.meta_info_path.open("wb") as f:
-                    pickle.dump({"ba_residual": slam_output.ba_residual}, f)
+                    slam_output.metrics["ba_residual"] = slam_output.ba_residual
+                    pickle.dump(slam_output.metrics, f)
 
             if self.out_cfg.save_viz:
                 save_projection_video(

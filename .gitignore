@@ -172,3 +172,16 @@ logs/
 core.*
 slurm/sana_video/
 *.mp4
+*.csv
+*.ply
+examples/
+thirdparty/
+vipe_results_sekai/
+vipe_debug/
+slurm/sekai_eval/
+evaluate_pilong.py
+evaluate_cameras.py
+configs/slam/reduce_jumps.yaml
+configs/slam/debug_jump.yaml
+configs/slam/reduce_jumps_conservative.yaml
+weights

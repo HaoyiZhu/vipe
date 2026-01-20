@@ -19,6 +19,9 @@
 # -------------------------------------------------------------------------------------------------
 
 import warnings
+import uuid
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import rerun as rr
@@ -54,6 +57,7 @@ class FactorGraph:
         max_factors: int,
         incremental: bool,
         cross_view: bool,
+        debug: Any | None = None,
     ):
         self.net = net
         self.buffer = buffer
@@ -61,6 +65,7 @@ class FactorGraph:
         self.max_factors = max_factors
         self.cross_view = cross_view and buffer.n_views > 1
         self.incremental = incremental
+        self._init_debug(debug)
 
         # operator at 1/8 resolution
         ht = buffer.height // 8
@@ -92,6 +97,119 @@ class FactorGraph:
         self.jj_inac = torch.as_tensor([], dtype=torch.long, device=device)
         self.target_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
         self.weight_inac = torch.zeros([1, 0, ht, wd, 2], device=device, dtype=torch.float)
+
+    def _init_debug(self, debug: Any | None) -> None:
+        self._debug_enabled = False
+        self._debug_frames = None
+        self._debug_out_dir = None
+        self._debug_max_dumps = 0
+        self._debug_every_n = 1
+        self._debug_contexts = None
+        self._debug_reject_delta_px = None
+        self._debug_dump_count = 0
+        self._debug_step = 0
+        self._debug_tag = uuid.uuid4().hex[:8]
+
+        if debug is None:
+            return
+
+        try:
+            enabled = bool(debug.get("enabled", False))
+        except Exception:
+            enabled = False
+        if not enabled:
+            return
+
+        frames = debug.get("frames", None)
+        if frames:
+            self._debug_frames = {int(f) for f in frames}
+        else:
+            self._debug_frames = None
+
+        out_dir = debug.get("out_dir", "debug/slam")
+        out_dir = Path(out_dir)
+        if not out_dir.is_absolute():
+            out_dir = Path.cwd() / out_dir
+        self._debug_out_dir = out_dir
+
+        self._debug_max_dumps = int(debug.get("max_dumps", 20))
+        self._debug_every_n = max(int(debug.get("every_n", 1)), 1)
+
+        contexts = debug.get("contexts", None)
+        if contexts:
+            self._debug_contexts = {str(c) for c in contexts}
+        else:
+            self._debug_contexts = None
+
+        reject_delta_px = debug.get("reject_delta_px", None)
+        if reject_delta_px is not None:
+            self._debug_reject_delta_px = float(reject_delta_px)
+
+        self._debug_enabled = True
+
+    def _should_debug_dump(self, context: str, step_idx: int) -> bool:
+        if not self._debug_enabled:
+            return False
+        if self._debug_contexts is not None and context not in self._debug_contexts:
+            return False
+        if self._debug_dump_count >= self._debug_max_dumps:
+            return False
+        if step_idx % self._debug_every_n != 0:
+            return False
+        return True
+
+    def _debug_dump(
+        self,
+        context: str,
+        step_idx: int,
+        ii: torch.Tensor,
+        jj: torch.Tensor,
+        coords1: torch.Tensor,
+        target: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> None:
+        if not self._should_debug_dump(context, step_idx):
+            return
+        if ii.numel() == 0:
+            return
+        if self._debug_out_dir is None:
+            return
+
+        t_i = self.buffer.tstamp[ii].detach().cpu().numpy()
+        t_j = self.buffer.tstamp[jj].detach().cpu().numpy()
+        if self._debug_frames is None:
+            idx = np.arange(ii.numel())
+        else:
+            mask = np.isin(t_i, list(self._debug_frames)) | np.isin(t_j, list(self._debug_frames))
+            if not np.any(mask):
+                return
+            idx = np.nonzero(mask)[0]
+
+        idx_t = torch.as_tensor(idx, device=ii.device)
+        ii_sel = ii[idx_t].detach().cpu().numpy()
+        jj_sel = jj[idx_t].detach().cpu().numpy()
+        t_i_sel = t_i[idx]
+        t_j_sel = t_j[idx]
+
+        coords1_sel = coords1[:, idx_t].detach().cpu().numpy()
+        target_sel = target[:, idx_t].detach().cpu().numpy()
+        weight_sel = weight[:, idx_t].detach().cpu().numpy()
+
+        self._debug_out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = self._debug_out_dir / f"{context}_{self._debug_tag}_step{step_idx:04d}_dump{self._debug_dump_count:04d}.npz"
+        np.savez(
+            out_path,
+            context=np.array([context]),
+            step=np.array([step_idx], dtype=np.int64),
+            ii=ii_sel,
+            jj=jj_sel,
+            t_i=t_i_sel,
+            t_j=t_j_sel,
+            coords1=coords1_sel,
+            target=target_sel,
+            weight=weight_sel,
+        )
+        self._debug_dump_count += 1
 
     def __filter_repeated_edges(self, ii, jj):
         """remove duplicate edges"""
@@ -269,6 +387,9 @@ class FactorGraph:
         self.f_net, delta, weight, damping, _ = self.net.update.forward(  # type: ignore
             self.f_net, self.inp, corr, motn, ix=dix
         )
+        if self._debug_reject_delta_px is not None:
+            delta_mag = torch.linalg.norm(delta, dim=-1)
+            weight[delta_mag > self._debug_reject_delta_px] = 0.0
         weight[:, self.buffer.masks[pi, qi]] = 0.0
 
         with torch.cuda.amp.autocast(enabled=False):
@@ -276,6 +397,9 @@ class FactorGraph:
             self.weight = weight.to(dtype=torch.float)
             # Overwrite damping with newly computed values
             self.damping[di] = damping
+
+            self._debug_step += 1
+            self._debug_dump("update", self._debug_step, self.ii, self.jj, coords1, self.target, self.weight)
 
             if use_inactive:
                 m = (self.ii_inac >= t0 - 3) & (self.jj_inac >= t0 - 3)
@@ -364,12 +488,18 @@ class FactorGraph:
                         motn[:, v_exp],
                         ix=dixs,
                     )
+                    if self._debug_reject_delta_px is not None:
+                        delta_mag = torch.linalg.norm(delta, dim=-1)
+                        weight[delta_mag > self._debug_reject_delta_px] = 0.0
                     weight[:, self.buffer.masks[pis, qis]] = 0.0
 
                 self.f_net[:, v_exp] = net
                 self.target[:, v_exp] = coords1[:, v_exp] + delta.float()
                 self.weight[:, v_exp] = weight.float()
                 self.damping[dis] = damping
+
+            self._debug_step += 1
+            self._debug_dump("update_batch", self._debug_step, self.ii, self.jj, coords1, self.target, self.weight)
 
             ht, wd = self.coords0.shape[0:2]
             target = rearrange(self.target, "1 k h w c -> k (h w) c", c=2, h=ht, w=wd)
@@ -392,6 +522,10 @@ class FactorGraph:
                 optimize_rig_rotation=optimize_rig_rotation,
                 verbose=solver_verbose,
             )
+
+            # Cleanup
+            del corr1, motn, net, delta, weight, damping
+            torch.cuda.empty_cache()
 
     def add_neighborhood_factors(self, t0, t1, r: int = 3):
         """

@@ -45,3 +45,5 @@ output:
   save_viz: true
   viz_downsample: 4
   viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]
+
+  save_slam_intermediate: true

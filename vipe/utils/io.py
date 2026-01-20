@@ -33,6 +33,7 @@ from vipe.streams.base import FrameAttribute, VideoFrame, VideoStream
 from vipe.utils.cameras import CameraType
 from vipe.utils.geometry import se3_matrix_to_se3
 from vipe.utils.visualization import VideoWriter
+from vipe.slam.interface import SLAMOutput
 
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,11 @@ class ArtifactPath:
     @property
     def slam_map_path(self) -> Path:
         return self.base_path / "vipe" / f"{self.artifact_name}_slam_map.pt"
+
+    @property
+    def slam_intermediate_path(self) -> Path:
+        # Raw SLAM output (poses/intrinsics) for debugging, before any post-processing.
+        return self.base_path / "vipe" / f"{self.artifact_name}_slam_intermediate.npz"
 
     @property
     def essential_paths(self) -> list[Path]:
@@ -179,6 +185,46 @@ def read_pose_artifacts_benchmark(npz_file_path: Path) -> dict:
         runtime=data.get("runtime", None),
         keyframe_ids=data.get("keyframe_ids", None),
         frame_num=len(data["inds"]),
+    )
+
+def save_slam_intermediate_artifacts(out_path: ArtifactPath, slam_output: SLAMOutput, view_idx: int = 0) -> None:
+    """
+    Save intermediate SLAM outputs to a single NPZ for debugging.
+
+    Contents (all numpy arrays):
+      - inds: (N,) frame indices (0..N-1)
+      - pose: (N, 4, 4) OpenCV cam2world matrices for the requested view
+      - intrinsics: (4,) [fx, fy, cx, cy] for the requested view (as returned by SLAM)
+      - rig: (V, 4, 4) rig transforms (if available; identity for single view)
+      - base_trajectory: (N, 4, 4) SLAM base trajectory (cam0) before applying rig
+      - view_idx: scalar int
+    """
+    n_frames = int(slam_output.trajectory.shape[0])
+    inds = np.arange(n_frames, dtype=np.int64)
+
+    pose_se3 = slam_output.get_view_trajectory(view_idx)
+    pose = pose_se3.matrix().cpu().numpy()
+
+    intr = slam_output.intrinsics[view_idx].cpu().numpy()
+    intr = intr[:4]  # [fx, fy, cx, cy]
+
+    base_traj = slam_output.trajectory.matrix().cpu().numpy()
+
+    if slam_output.rig is not None:
+        rig = slam_output.rig.matrix().cpu().numpy()
+    else:
+        rig = np.eye(4, dtype=np.float32)[None]
+
+    path = out_path.slam_intermediate_path
+    path.parent.mkdir(exist_ok=True, parents=True)
+    np.savez(
+        path,
+        inds=inds,
+        pose=pose,
+        intrinsics=intr,
+        rig=rig,
+        base_trajectory=base_traj,
+        view_idx=np.array(view_idx, dtype=np.int64),
     )
 
 

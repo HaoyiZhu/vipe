@@ -296,6 +296,9 @@ class VideoStream(IterableDataset[VideoFrame]):
     def __len__(self) -> int:
         raise NotImplementedError
 
+    def __getitem__(self, index: int) -> VideoFrame:
+        raise NotImplementedError
+
     def attributes(self) -> set[FrameAttribute]:
         return set()
 

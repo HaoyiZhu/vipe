@@ -37,10 +37,25 @@ def make_depth_model(model: str):
 
         return MogeModel()
 
+    elif model_name == "moge2":
+        from .moge_v2 import MoGeV2Model
+
+        return MoGeV2Model()
+
     elif model_name == "dav3":
         from .dav3 import DepthAnything3Model
 
         return DepthAnything3Model()
+
+    elif model_name == "pi3x":
+        from .pi3x import Pi3XDepthModel
+
+        return Pi3XDepthModel()
+
+    elif model_name == "pi3x_moge":
+        from .pi3x_moge import Pi3XMoGeV2Model
+
+        return Pi3XMoGeV2Model()
 
     else:
         raise ValueError(f"Unknown depth model: {model}")

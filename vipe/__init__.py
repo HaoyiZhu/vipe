@@ -14,6 +14,12 @@
 # limitations under the License.
 
 from pathlib import Path
+import sys
+
+# Add thirdparty to sys.path to support vendored packages
+thirdparty_path = Path(__file__).parent / "thirdparty"
+if str(thirdparty_path) not in sys.path:
+    sys.path.insert(0, str(thirdparty_path))
 
 from omegaconf import OmegaConf
 

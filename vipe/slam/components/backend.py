@@ -85,6 +85,7 @@ class SLAMBackend:
             max_factors=16 * t,
             incremental=False,
             cross_view=self.args.cross_view,
+            debug=self.args.get("debug", None),
         )
 
         graph.add_proximity_factors(
@@ -93,6 +94,24 @@ class SLAMBackend:
             thresh=self.args.backend_thresh,
             beta=self.args.beta,
         )
+
+        if self.video.sparse_tracks.enabled:
+            # Get long-range edges from sparse tracks (only for frames far apart)
+            min_frame_gap = int(self.args.get("sparse_tracks_min_gap", 50))
+            max_sparse_edges = int(self.args.get("sparse_tracks_max_edges", 100))
+            ii_sparse, jj_sparse = self.video.sparse_tracks.get_overlapping_pairs(
+                min_common=15, min_frame_gap=min_frame_gap, max_pairs=max_sparse_edges
+            )
+            if ii_sparse.numel() > 0:
+                # Filter out pairs that are out of bounds of current video buffer
+                # Backend might be called when only a subset of frames are in the buffer (during frontend run_if_necessary)
+                valid_mask = (ii_sparse < t) & (jj_sparse < t)
+                if valid_mask.any():
+                    graph.add_factors(
+                        ii_sparse[valid_mask].to(self.device),
+                        jj_sparse[valid_mask].to(self.device),
+                        remove=False
+                    )
 
         if self.args.adaptive_cross_view:
             self.video.build_adaptive_cross_view_idx()

@@ -44,6 +44,7 @@ class SLAMFrontend:
             max_factors=48,
             incremental=True,
             cross_view=args.cross_view,
+            debug=args.get("debug", None),
         )
 
         # Number of frames that the frontend has so far optimized.

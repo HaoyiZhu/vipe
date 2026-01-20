@@ -76,6 +76,7 @@ class DepthEstimationInput:
     video_frame_list: list[np.ndarray] | None = None
     prompt_metric_depth: torch.Tensor | None = None
     intrinsics: torch.Tensor | None = None
+    poses: torch.Tensor | None = None
     camera_type: CameraType = CameraType.PINHOLE
 
 

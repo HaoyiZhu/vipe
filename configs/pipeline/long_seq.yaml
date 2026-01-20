@@ -1,0 +1,40 @@
+defaults:
+  - pi3x_moge2
+
+instance: vipe.pipeline.long_sequence.LongSequenceAnnotationPipeline
+
+# Override/Add to init config
+init:
+  # VGGT-Long defaults
+  chunk_size: 100
+  overlap: 50
+  
+  long_seq:
+    loop_chunk_size: 20
+    loop_enable: true
+    delete_temp_files: true
+    using_sim3: true
+    world_points_source: "slam_map"
+    alignment_conf_threshold_coef: 0.1
+    
+    weights:
+      salad: './weights/dino_salad.ckpt'
+    
+    irls:
+      delta: 0.1
+      max_iters: 5
+      tol: 1e-9
+    
+    pointcloud_save:
+      sample_ratio: 0.015
+      conf_threshold_coef: 0.75
+      use_confidence_filtering: true
+
+    loop:
+      similarity_threshold: 0.9
+      nms_threshold: 25
+      loop_window: 200
+      
+    sim3_optimizer:
+      max_iterations: 30
+      lambda_init: 1e-6

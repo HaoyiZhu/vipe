@@ -1,0 +1,20 @@
+defaults:
+  - default
+
+slam:
+  keyframe_depth: pi3x_moge # pi3x # moge2
+
+post:
+  # Same strategy as AdaptiveDepthProcessor but with Pi3X as the video depth model.
+  depth_align_model: "adaptive_pi3x"
+  metric_model: "pi3x_moge" #  "unidepth-l"
+  pixel_limit: 255000
+  batch_size: 64
+  # Sliding-window alignment to reduce temporal scale drift (similar to VideoDepthAnything).
+  # window_align: true
+  # window_size: 32
+  # overlap_size: 10
+  # interp_len: 8
+
+output:
+  save_slam_intermediate: true

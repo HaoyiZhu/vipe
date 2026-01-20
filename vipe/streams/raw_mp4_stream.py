@@ -66,11 +66,37 @@ class RawMp4Stream(VideoStream):
     def __len__(self) -> int:
         return len(range(self.start, self.end, self.step))
 
-    def __iter__(self):
-        self.vcap = cv2.VideoCapture(self.path)
-        self.current_frame_idx = -1
-        return self
+    def __getitem__(self, index: int) -> VideoFrame:
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(f"Index {index} out of bounds for stream of length {len(self)}")
+            
+        real_idx = self.start + index * self.step
+        
+        # Optimize: if current vcap position is close, seek or read
+        if not hasattr(self, 'vcap') or not self.vcap.isOpened():
+            self.vcap = cv2.VideoCapture(str(self.path))
+            self.current_frame_idx = -1
+            
+        # Seeking in mp4 can be slow/imprecise, but for random access we must seek.
+        # cv2.CAP_PROP_POS_FRAMES is 0-based index of the frame to be decoded/captured next.
+        if self.current_frame_idx != real_idx - 1:
+            self.vcap.set(cv2.CAP_PROP_POS_FRAMES, real_idx)
+            self.current_frame_idx = real_idx - 1
+            
+        ret, frame = self.vcap.read()
+        self.current_frame_idx += 1
+        
+        if not ret:
+            raise RuntimeError(f"Failed to read frame at index {real_idx}")
 
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame_rgb = torch.as_tensor(frame).float() / 255.0
+        frame_rgb = frame_rgb.cuda()
+        
+        return VideoFrame(raw_frame_idx=self.current_frame_idx, rgb=frame_rgb)
+            
     def __next__(self) -> VideoFrame:
         while True:
             ret, frame = self.vcap.read()
@@ -95,6 +121,12 @@ class RawMp4Stream(VideoStream):
         frame_rgb = frame_rgb.cuda()
 
         return VideoFrame(raw_frame_idx=self.current_frame_idx, rgb=frame_rgb)
+
+
+    def __iter__(self):
+        self.vcap = cv2.VideoCapture(str(self.path))
+        self.current_frame_idx = -1
+        return self
 
 
 class ZipMp4Stream(RawMp4Stream):

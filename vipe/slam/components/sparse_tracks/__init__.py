@@ -20,7 +20,7 @@ import torch
 
 from omegaconf.dictconfig import DictConfig
 
-from vipe.streams.base import VideoFrame
+from vipe.streams.base import VideoFrame, VideoStream
 from vipe.utils.depth import bilinear_splatting_inplace
 
 
@@ -36,6 +36,14 @@ class SparseTracks(ABC):
 
     @abstractmethod
     def track_image(self, frame_data_list: list[VideoFrame]) -> None: ...
+
+    # Optional hook: run an offline tracker after all frames are available.
+    def finalize(self, video_streams: list[VideoStream]) -> None:
+        return None
+
+    # Optional hook: precompute tracks before SLAM starts.
+    def precompute(self, video_streams: list[VideoStream]) -> None:
+        return None
 
     def get_correspondences(self, view_idx: int, source_frame_idx: int, target_frame_idx: int) -> torch.Tensor:
         """
@@ -64,6 +72,72 @@ class SparseTracks(ABC):
             .to(keypoint_indices.device)
             .float()
         )
+
+    def get_overlapping_pairs(
+        self, min_common: int = 15, min_frame_gap: int = 50, max_pairs: int = 100
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Find pairs of frames that share at least `min_common` tracks.
+        Only returns pairs where the frame gap is at least `min_frame_gap`.
+        Returns at most `max_pairs` pairs, prioritizing those with the most common tracks.
+        Returns (ii, jj) tensors of frame indices.
+        """
+        pairs_list = []
+
+        # Invert the observations: track_id -> set of frame_indices
+        for view_idx in range(len(self.observations)):
+            track_to_frames: dict[int, list[int]] = {}
+
+            # self.observations[view_idx] is a list of dicts (frame -> {track_id: uv})
+            for frame_idx, obs in enumerate(self.observations[view_idx]):
+                for track_id in obs.keys():
+                    if track_id not in track_to_frames:
+                        track_to_frames[track_id] = []
+                    track_to_frames[track_id].append(frame_idx)
+
+            # Count shared tracks for each pair
+            pair_counts: dict[tuple[int, int], int] = {}
+
+            for frames in track_to_frames.values():
+                if len(frames) < 2:
+                    continue
+                # All pairs in this list share this track
+                for i in range(len(frames)):
+                    for j in range(i + 1, len(frames)):
+                        f1, f2 = frames[i], frames[j]
+                        if f1 > f2:
+                            f1, f2 = f2, f1
+                        # Only consider pairs with sufficient frame gap
+                        if f2 - f1 < min_frame_gap:
+                            continue
+                        pair = (f1, f2)
+                        pair_counts[pair] = pair_counts.get(pair, 0) + 1
+
+            for pair, count in pair_counts.items():
+                if count >= min_common:
+                    pairs_list.append((count, pair[0], pair[1]))
+
+        if not pairs_list:
+            return torch.empty(0, dtype=torch.long), torch.empty(0, dtype=torch.long)
+
+        # Sort by count descending and take top max_pairs
+        pairs_list.sort(key=lambda x: -x[0])
+        pairs_list = pairs_list[:max_pairs]
+
+        # Remove duplicates (in case multiple views found the same pair)
+        seen = set()
+        unique_pairs = []
+        for _, i, j in pairs_list:
+            if (i, j) not in seen:
+                seen.add((i, j))
+                unique_pairs.append((i, j))
+
+        if not unique_pairs:
+            return torch.empty(0, dtype=torch.long), torch.empty(0, dtype=torch.long)
+
+        ii = torch.tensor([p[0] for p in unique_pairs], dtype=torch.long)
+        jj = torch.tensor([p[1] for p in unique_pairs], dtype=torch.long)
+        return ii, jj
 
     def compute_dense_disp_target_weight(
         self,
@@ -152,5 +226,34 @@ def build_sparse_tracks(config: DictConfig, n_views: int) -> SparseTracks:
         from .cuvslam import CuVSLAMSparseTracks
 
         return CuVSLAMSparseTracks(n_views)
+
+    if config.name == "cotracker3":
+        from .cotracker import CoTrackerSparseTracks
+
+        return CoTrackerSparseTracks(
+            n_views,
+            model_name=config.get("model_name", "cotracker3_offline"),
+            grid_size=config.get("grid_size", 12),
+            visibility_thre=config.get("visibility_thre", 0.5),
+            device=config.get("device", "cuda"),
+            online=config.get("online", False),
+            step=config.get("step", 8),
+            chunk_size=config.get("chunk_size", 256),
+            overlap=config.get("overlap", 32),
+            valid_mask_only=config.get("valid_mask_only", False),
+            min_valid_ratio=config.get("min_valid_ratio", 0.05),
+            min_valid_pixels=config.get("min_valid_pixels", 1000),
+            save_vis=config.get("save_vis", False),
+            vis_out_dir=config.get("vis_out_dir", "vipe_debug/cotracker"),
+            vis_stride=config.get("vis_stride", 5),
+            vis_query_frame=config.get("vis_query_frame", 0),
+            vis_fps=config.get("vis_fps", 10),
+            vis_max_points=config.get("vis_max_points", 2000),
+            stitch_tracks=config.get("stitch_tracks", True),
+            stitch_max_dist=config.get("stitch_max_dist", 5.0),
+            stitch_min_frames=config.get("stitch_min_frames", 3),
+            save_npz=config.get("save_npz", False),
+            npz_out_dir=config.get("npz_out_dir", "vipe_debug/cotracker_npz"),
+        )
 
     raise ValueError(f"Unknown sparse tracks: {config.name}")

@@ -103,6 +103,7 @@ class ClientClosures:
         self.gui_playback_handle: viser.GuiFolderHandle | None = None
         self.gui_timestep: viser.GuiSliderHandle | None = None
         self.gui_framerate: viser.GuiSliderHandle | None = None
+        self.gui_show_all_frames: viser.GuiCheckboxHandle | None = None
         self.scene_frame_handles: list[SceneFrameHandle] = []
         self.current_displayed_timestep: int = 0
 
@@ -129,8 +130,8 @@ class ClientClosures:
                     self.gui_id.value = (self.gui_id.value + 1) % len(all_artifacts)
 
             self.gui_name = self.client.gui.add_text("Artifact Name", "")
-            self.gui_t_sub = self.client.gui.add_slider("Temporal subsample", min=1, max=16, step=1, initial_value=1)
-            self.gui_s_sub = self.client.gui.add_slider("Spatial subsample", min=1, max=8, step=1, initial_value=2)
+            self.gui_t_sub = self.client.gui.add_slider("Temporal subsample", min=1, max=16, step=1, initial_value=10)
+            self.gui_s_sub = self.client.gui.add_slider("Spatial subsample", min=1, max=8, step=1, initial_value=8)
             self.gui_id.on_update(self.on_sample_update)
             self.gui_t_sub.on_update(self.on_sample_update)
             self.gui_s_sub.on_update(self.on_sample_update)
@@ -356,6 +357,22 @@ class ClientClosures:
             )
             gui_frame_control = self.client.gui.add_button_group("Control", options=["Prev", "Next"])
             self.gui_framerate = self.client.gui.add_slider("FPS", min=0, max=30, step=1.0, initial_value=15)
+            self.gui_show_all_frames = self.client.gui.add_checkbox(
+                "Show all frames",
+                initial_value=False,
+            )
+
+            @self.gui_show_all_frames.on_update
+            async def _(_) -> None:
+                show_all = self.gui_show_all_frames.value
+                current_timestep = self.gui_timestep.value
+                with self.client.atomic():
+                    if show_all:
+                        for handle in self.scene_frame_handles:
+                            handle.visible = True
+                    else:
+                        for i, handle in enumerate(self.scene_frame_handles):
+                            handle.visible = i == current_timestep
 
             @gui_frame_control.on_click
             async def _(_) -> None:
@@ -370,10 +387,18 @@ class ClientClosures:
             async def _(_) -> None:
                 current_timestep = self.gui_timestep.value
                 prev_timestep = self.current_displayed_timestep
-                with self.client.atomic():
-                    self.scene_frame_handles[current_timestep].visible = True
-                    self.scene_frame_handles[prev_timestep].visible = False
+                
+                if not self.gui_show_all_frames.value:
+                    with self.client.atomic():
+                        self.scene_frame_handles[current_timestep].visible = True
+                        if prev_timestep != current_timestep:
+                            self.scene_frame_handles[prev_timestep].visible = False
+                
                 self.current_displayed_timestep = current_timestep
+
+            # Initialize visibility
+            if not self.gui_show_all_frames.value and self.scene_frame_handles:
+                self.scene_frame_handles[self.gui_timestep.value].visible = True
 
     def cleanup(self):
         logger.info(f"Client {self.client.client_id} disconnected")

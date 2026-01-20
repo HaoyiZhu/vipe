@@ -1,0 +1,105 @@
+defaults:
+  - default
+
+# Keep SLAM the same as default (this avoids the long-seq instability you saw with Pi3X/DAv3 as keyframe priors).
+# We only change the post depth stage to use Pi3X (multi-frame) + MoGe2 (per-frame) metric alignment.
+
+# slam:
+#   buffer: 1024
+#   # weight for translation / rotation components of flow
+#   beta: 0.3
+#   # how much motion before considering new keyframe
+#   filter_thresh: 1.6
+#   # number of warmup frames
+#   warmup: 8
+#   # threshold to create a new keyframe
+#   keyframe_thresh: 2.0
+#   # add edges between frames whithin this distance
+#   frontend_thresh: 8.0
+#   # frontend optimization window
+#   frontend_window: 30
+#   # force edges between frames within radius
+#   frontend_radius: 1
+#   # non-maximal supression of edges
+#   frontend_nms: 1
+#   # Whether to initialize sequentially
+#   seq_init: true
+#   # Keyframe ids for running backends
+#   frontend_backend_iters: [8, 32, 128, 256]
+#   backend_thresh: 12.0
+#   backend_radius: 1
+#   backend_nms: 2
+#   backend_iters: 24
+#   # Initial values for disparity
+#   init_disp: 1.0
+#   # Whether to optimize intrinsics
+#   optimize_intrinsics: ???
+#   # Whether to optimize rig
+#   optimize_rig_rotation: false
+#   # Whether add reproj factors for cross-views
+#   cross_view: true
+#   cross_view_idx: null  # null means default
+#   adaptive_cross_view: false  # Backend only, recompute cross_view_idx
+#   # Chunk size of the infill
+#   infill_chunk_size: 8
+#   # Whether or not to infill dense disparity
+#   infill_dense_disp: False
+#   # Filter threshold for SLAM map (percentage of the mean depth difference allowed)
+#   # (This is also used for dense disp extraction)
+#   map_filter_thresh: 0.05
+#   # Whether to visualize the results using rerun
+#   visualize: true
+
+#   debug:
+#     enabled: true
+#     # original frame indices to monitor for bad correspondences
+#     frames: [557, 558, 559]
+#     out_dir: vipe_debug/slam_targets
+#     max_dumps: 40
+#     every_n: 1
+#     contexts: ["update", "update_batch"]
+#     # Optional: reject correspondences with large predicted flow (at 1/8 resolution)
+#     # Set to null to disable.
+#     reject_delta_px: 8.0
+
+
+#   keyframe_depth: moge2
+#   filter_thresh: 2.0
+#   frontend_window: 36
+
+# init:
+#   pose_init:
+#     name: "pi3x_vo"
+#     enabled: true
+#     model: "yyfz233/Pi3X"
+#     chunk_size: 16
+#     overlap: 6
+#     conf_thre: 0.05
+#     dtype: "bf16"
+#     pose_convention: "c2w"
+#     pixel_limit: 255000
+  
+output:
+  save_slam_intermediate: true
+  save_viz: true
+  viz_downsample: 4
+  viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]
+
+post:
+  depth_align_model: "pi3x_moge_perframe"
+  pixel_limit: 255000
+  window_size: 64
+  overlap_size: 16
+  # Alignment settings
+  align_lr_size: 64
+  min_align_points: 200
+  # Consistency: use a window-shared affine (scale+z-shift) with EMA smoothing.
+  align_mode: "window_shared_ema"
+  align_momentum: 0.99
+  scale_clamp: [0.1, 10.0]
+  shift_z_clamp: [-1000.0, 1000.0]
+  # Alignment target: use SLAM map points instead of MoGe2 per-frame points.
+  align_source: "slam_map"
+  # Run MoGe2 in small batches to avoid 32-bit indexing limits inside convs.
+  moge_bs: 16
+

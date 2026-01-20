@@ -37,6 +37,7 @@ from vipe.utils.visualization import POINTS_STENCIL, draw_lines_batch, draw_poin
 
 from ..ba.solver import Solver, SparseBlockVector
 from ..ba.terms import DenseDepthFlowTerm, DispSensRegularizationTerm
+from ..ba.kernel import HuberRobustKernel
 from ..interface import SLAMMap
 from ..maths import geom
 from ..maths.retractor import DenseDispRetractor, IntrinsicsRetractor, PoseRetractor, RigRotationOnlyRetractor
@@ -255,16 +256,43 @@ class GraphBuffer:
 
             frames_to_update = pbar(range(self.n_frames), desc="Update depth")
 
-        assert self.n_views == 1
+        from vipe.priors.depth.pi3x_moge import Pi3XMoGeV2Model
+        from vipe.priors.depth.pi3x import Pi3XDepthModel
+
+        if self.n_views > 1:
+            assert isinstance(depth_model, (Pi3XDepthModel, Pi3XMoGeV2Model)), "Only Pi3X supports multi-view depth for now"
 
         for frame_idx in frames_to_update:
+            intrinsics = self.camera_type.build_camera_model(self.intrinsics).pinhole().intrinsics
+            if self.n_views > 1:
+                intrinsics_to_pass = torch.eye(3, device=self.device)[None].repeat(self.n_views, 1, 1)
+                intrinsics_to_pass[:, 0, 0] = intrinsics[:, 0]
+                intrinsics_to_pass[:, 1, 1] = intrinsics[:, 1]
+                intrinsics_to_pass[:, 0, 2] = intrinsics[:, 2]
+                intrinsics_to_pass[:, 1, 2] = intrinsics[:, 3]
+            else:
+                intrinsics_to_pass = intrinsics[0]
+
             depth_input = DepthEstimationInput(
                 rgb=self.images[frame_idx].moveaxis(1, -1).float(),
-                intrinsics=self.intrinsics[0],
+                intrinsics=intrinsics_to_pass,
+                poses=SE3(self.rig).matrix() if self.n_views > 1 else None,
                 camera_type=self.camera_type,
             )
             disp_sens = depth_model.estimate(depth_input).metric_depth
+            if self.n_views == 1 and disp_sens.dim() == 2:
+                disp_sens = disp_sens[None]
+
             disp_sens = disp_sens[:, 3::8, 3::8]
+            
+            # Interpolate to match the size
+            if disp_sens.shape[-2:] != self.disps_sens.shape[-2:]:
+                disp_sens = torch.nn.functional.interpolate(
+                    disp_sens.unsqueeze(1),
+                    size=self.disps_sens.shape[-2:],
+                    mode="nearest"
+                ).squeeze(1)
+
             disp_sens = torch.where(disp_sens > 0, disp_sens.reciprocal(), disp_sens)
             self.disps_sens[frame_idx] = disp_sens
 
@@ -396,15 +424,31 @@ class GraphBuffer:
         They have to be coupled together to work.
         """
         assert t0 <= t1
-        weight_dense_disp, weight_tracks = 0.001, 0.001
-        # weight_dense_disp, weight_tracks = 0.001, 0.0
-        # weight_dense_disp, weight_tracks = 0.0, 0.001
+        weight_dense_disp = float(getattr(self.ba_config, "weight_dense_disp", 0.001))
+        weight_tracks = float(getattr(self.ba_config, "weight_tracks", 0.001))
+        # Frame gap threshold for switching from dense to sparse constraints
+        sparse_tracks_gap_thresh = int(getattr(self.ba_config, "sparse_tracks_gap_thresh", 10))
 
         pi, qi, di, pj, qj, dj = self.expand_edge_multiview(ii, jj)
         di_unique = torch.unique(di)
         pi_unique = torch.unique(ii)  # Should be equivalent to unique(pi)
 
+        # Compute frame gap for each edge (before multiview expansion)
+        frame_gaps = torch.abs(ii - jj).float()
+        # Expand to match multiview expansion
+        frame_gaps_exp = frame_gaps.unsqueeze(-1).repeat(1, self.n_views).reshape(-1)
+
+        # Per-edge weight scaling based on frame gap:
+        # - Local edges (gap < thresh): Full dense weight, reduced sparse weight
+        # - Long-range edges (gap >= thresh): Reduced dense weight, full sparse weight
+        is_local = frame_gaps_exp < sparse_tracks_gap_thresh
+        dense_scale = torch.where(is_local, torch.ones_like(frame_gaps_exp), torch.full_like(frame_gaps_exp, 0.1))
+        sparse_scale = torch.where(is_local, torch.full_like(frame_gaps_exp, 0.1), torch.ones_like(frame_gaps_exp))
+
         solver = Solver(compute_energy=verbose)
+        
+        # Scale dense flow weight per-edge
+        scaled_dense_weight = weight_dense_disp * weight * dense_scale.view(-1, 1, 1)
         solver.add_term(
             DenseDepthFlowTerm(
                 pose_i_inds=pi,
@@ -413,7 +457,7 @@ class GraphBuffer:
                 rig_j_inds=qj,
                 dense_disp_i_inds=di,
                 target=target,
-                weight=weight_dense_disp * weight,
+                weight=scaled_dense_weight,
                 intrinsics=None,
                 intrinsics_factor=8.0,
                 rig=None,
@@ -434,6 +478,8 @@ class GraphBuffer:
             )
             sparse_target = sparse_target.flatten(1, 2)
             sparse_weight = sparse_weight.flatten(1, 2)
+            # Scale sparse track weight per-edge (stronger for long-range, weaker for local)
+            scaled_sparse_weight = weight_tracks * sparse_weight * sparse_scale.view(-1, 1, 1)
             solver.add_term(
                 DenseDepthFlowTerm(
                     pose_i_inds=pi,
@@ -442,13 +488,14 @@ class GraphBuffer:
                     rig_j_inds=qj,
                     dense_disp_i_inds=di,
                     target=sparse_target,
-                    weight=weight_tracks * sparse_weight,
+                    weight=scaled_sparse_weight,
                     intrinsics=None,
                     intrinsics_factor=8.0,
                     rig=None,
                     image_size=(self.height // 8, self.width // 8),
                     camera_type=self.camera_type,
-                )
+                ),
+                kernel=HuberRobustKernel(),
             )
 
         # self.debug_visualize_target_weight(
@@ -525,13 +572,20 @@ class GraphBuffer:
         if verbose:
             logger.info(f"BA iters = {n_iters}, energy: {ba_energy[0]} -> {ba_energy[-1]}")
 
-        if len(ba_energy) > 0:
+        if len(ba_energy) > 0 and verbose:
             # We normalize the energy by the total number of pixels to make it independent of the image size.
             # ba_energy is roughly sum(w * (p - t)^2)
             # The weight w is roughly (8.0 / (2 * 0.25))^2 ~ 256
             # So sqrt(ba_energy / N) / 16 ~ pixel error.
             # N = num_edges * H * W
             total_elements = target.numel() / 2
+            
+            # Note: For sparse tracks, the 'target' tensor contains dense displacement maps where most values are 0.
+            # This makes total_elements huge, potentially underestimating the residual per valid pixel.
+            # However, for dense flow, this is correct.
+            # Since weight is already 0 for invalid sparse track pixels, energy is correct.
+            # To get a more meaningful residual for sparse tracks, we might need to count valid pixels.
+            
             self.ba_residual = np.sqrt(ba_energy[-1] / (total_elements + 1e-6)) / 16.0
             if verbose:
                 logger.info(f"BA residual: {self.ba_residual}")

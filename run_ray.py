@@ -54,7 +54,7 @@ def initialize_ray():
 # --- Remote Worker Function ---
 # num_gpus=1 ensures each worker gets dedicated access to 1 GPU.
 # With 8 GPUs available, Ray will run 8 of these functions in parallel.
-@ray.remote(num_gpus=0.5, num_cpus=4)
+@ray.remote(num_gpus=1, num_cpus=8)
 def run_video_stream(cwd, stream_list, stream_idx, pipeline_args):
     # 1. Set working directory to the hydra original cwd so relative paths work
     os.chdir(str(cwd))

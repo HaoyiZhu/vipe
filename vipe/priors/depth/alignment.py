@@ -44,6 +44,10 @@ def align_inv_depth_to_depth(
     else:
         target_mask = torch.logical_and(target_mask > 0, target_depth_mask)
 
+    # If there are no valid pixels to align, fail fast so callers can fall back.
+    if not source_mask.any() or not target_mask.any():
+        raise RuntimeError("align_inv_depth_to_depth: no valid pixels in source/target to align.")
+
     # Remove outliers
     if quantile_masking:
         outlier_quantiles = torch.tensor([0.1, 0.9], device=source_inv_depth.device)

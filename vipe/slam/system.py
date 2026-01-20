@@ -17,6 +17,7 @@ import uuid
 
 import numpy as np
 import rerun as rr
+import logging
 import torch
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
@@ -39,6 +40,8 @@ from .components.motion_filter import MotionFilter
 from .components.sparse_tracks import build_sparse_tracks
 from .interface import SLAMOutput
 from .networks.droid_net import DroidNet
+
+logger = logging.getLogger(__name__)
 
 
 class StandardResizeStreamProcessor(StreamProcessor):
@@ -115,11 +118,15 @@ class SLAMSystem:
         self.inner_filler = InnerFiller(self.droid_net, self.buffer, self.config, device=self.device)
 
         if self.config.keyframe_depth is not None:
-            assert self.config.n_views == 1, """Currently the global scale lies in the null-space of the SLAM problem. 
-            Adding more views requires adding factors to the graph to keep the null-space. 
-            This is currently not supported for now."""
-
             self.metric_depth = make_depth_model(self.config.keyframe_depth)
+
+            from vipe.priors.depth.pi3x import Pi3XDepthModel
+
+            if not isinstance(self.metric_depth, Pi3XDepthModel):
+                assert self.config.n_views == 1, """Currently the global scale lies in the null-space of the SLAM problem. 
+                Adding more views requires adding factors to the graph to keep the null-space. 
+                This is currently not supported for now."""
+
             if self.config.camera_type not in self.metric_depth.supported_camera_types:
                 self.metric_depth = PinholeDepthAdapter(self.metric_depth)
 
@@ -245,6 +252,13 @@ class SLAMSystem:
 
         self._build_components()
 
+        # Optional: precompute sparse tracks before SLAM starts.
+        if self.config.get("sparse_tracks", None) is not None and self.config.sparse_tracks.get("precompute", False):
+            try:
+                self.sparse_tracks.precompute(video_streams)
+            except Exception:
+                logger.exception("Sparse track precompute failed; continuing without precompute.")
+
         if self.visualize:
             rr.init("ViPE Visualization", spawn=True, recording_id=uuid.uuid4())
             rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
@@ -257,7 +271,8 @@ class SLAMSystem:
         ):
             images, buffer_masks = self._precompute_features(frame_data_list)
 
-            self.sparse_tracks.track_image(frame_data_list)
+            if not self.config.sparse_tracks.get("precompute", False):
+                self.sparse_tracks.track_image(frame_data_list)
 
             if self.motion_filter.check(images, buffer_masks) or frame_idx == total_n_frames - 1:
                 is_keyframe = True
@@ -277,6 +292,10 @@ class SLAMSystem:
                 self.backend.run_if_necessary(5, log=self.visualize)
 
         # Tracks can be determined earlier since it's fixed after frontend.
+        try:
+            self.sparse_tracks.finalize(video_streams)
+        except Exception:
+            logger.exception("Sparse track finalize failed; continuing without sparse tracks.")
         if self.visualize:
             self.buffer.log_tracks()
 
