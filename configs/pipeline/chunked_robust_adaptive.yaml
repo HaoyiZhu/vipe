@@ -1,0 +1,192 @@
+defaults:
+  - /slam: default
+
+instance: vipe.pipeline.chunked_robust.ChunkedRobustAnnotationPipeline
+
+# Init configs
+init:
+  camera_type: "pinhole"
+  intrinsics: "geocalib"
+  instance:
+    kf_gap_sec: 2.0
+    phrases:
+      - person
+      - animal
+      - vehicle
+      - ball
+      - balloon
+      - gun
+      - pet
+      - car
+      - bus
+    add_sky: true
+  pose_init:
+    name: "pi3x_vo"
+    enabled: true
+    model: "yyfz233/Pi3X"
+    chunk_size: 64
+    overlap: 32
+    conf_thre: 0.05
+    dtype: "bf16"
+    pose_convention: "c2w"
+    with_depth: false
+    depth_conf_thre: null
+
+# Robust guards (used for per-chunk decisions)
+robust:
+  pose_guard:
+    enabled: true
+    max_translation: 2.5
+    max_rotation_deg: 25.0
+    max_outlier_ratio: 0.2
+    max_consecutive_outliers: 5
+    max_missing_ratio: 0.1
+    min_pairs: 5
+    drop_depth_on_reject: false
+
+# Chunked pipeline controls
+chunked:
+  chunk_size: 200
+  overlap: 50
+  min_chunk_size: 20
+  blend_len: 20
+  bad_chunk_weight: 0.4
+  anchor_first_good: true
+  world_points_source: "auto"
+  delete_temp_files: true
+  precompute_init: false
+
+  adaptive:
+    enabled: true
+    min_mask_ratio: 0.05
+    min_mask_mean_ratio: 0.1
+    bad_if_pose_missing: true
+    bad_if_pose_jump: true
+    pose_jump_translation: 2.5
+    pose_jump_rotation_deg: 25.0
+    bad_zone_window: 5
+    bad_zone_min_len: 1
+    bad_zone_expand: 50
+    bad_zone_merge_gap: 5
+
+  guard:
+    require_pose_guard_accept: true
+    min_valid_mask_ratio: 0.05
+    min_mean_valid_mask_ratio: 0.1
+    max_ba_residual: 0.005
+
+  fallback:
+    use_pi3x_depth: true
+    pi3x_model: "yyfz233/Pi3X"
+    pixel_limit: 255000
+    depth_batch_size: 32
+    use_poses: true
+
+  irls:
+    delta: 0.1
+    max_iters: 5
+    tol: 1e-9
+
+  sim3_optimizer:
+    max_iterations: 30
+    lambda_init: 1e-6
+
+  loop_edges:
+    enabled: true
+    similarity_threshold: 0.9
+    loop_window: 200
+    nms_threshold: 25
+    half_window: 10
+    max_edges: 100
+    min_valid_points: 200
+    ckpt_path: "./weights/dino_salad.ckpt"
+    loop_file: null
+
+  postpass:
+    enabled: true
+    force: false
+    max_ba_residual: 0.005
+    bad_zone_expand: 50
+    bad_zone_merge_gap: 5
+    min_bad_len: 1
+    chunk_size: 80
+    overlap: 20
+    min_chunk_size: 10
+
+  sparse_ba:
+    enabled: false
+    use_sim3: false
+    min_tracks: 30
+    min_points: 30
+    min_frame_gap: 10
+    max_frame_gap: 200
+    max_edges: 100
+    max_iterations: 30
+    lambda_init: 1e-6
+    tracks:
+      name: cotracker3_masked
+      precompute: true
+      valid_mask_only: true
+      min_valid_ratio: 0.05
+      min_valid_pixels: 1000
+      grid_size: 12
+      visibility_thre: 0.5
+      device: "cuda"
+      online: false
+      chunk_size: 256
+      overlap: 32
+      stitch_tracks: true
+
+  # For "bad" chunks, use a MoGe2 alignment so we don't depend on SLAM maps.
+  post_bad:
+    depth_align_model: "pi3x_moge_perframe"
+    pixel_limit: 255000
+    window_size: 64
+    overlap_size: 16
+    align_lr_size: 64
+    min_align_points: 200
+    align_mode: "window_shared_ema"
+    align_momentum: 0.99
+    scale_clamp: [0.1, 10.0]
+    shift_z_clamp: [-1000.0, 1000.0]
+    align_source: "moge2"
+    moge_bs: 16
+    max_window_align_points: 2000
+    max_frame_align_points: 2000
+
+  global_slam:
+    enabled: false
+
+slam:
+  keyframe_thresh: 1.0
+  keyframe_depth: pi3x_moge # unidepth-l
+  optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
+
+# Post-processing configs (for "good" chunks)
+post:
+  depth_align_model: "pi3x_moge_perframe"
+  pixel_limit: 255000
+  window_size: 64
+  overlap_size: 16
+  align_lr_size: 64
+  min_align_points: 200
+  align_mode: "window_shared_ema"
+  align_momentum: 0.99
+  scale_clamp: [0.1, 10.0]
+  shift_z_clamp: [-1000.0, 1000.0]
+  align_source: "slam_map"
+  moge_bs: 16
+  max_window_align_points: 2000
+  max_frame_align_points: 2000
+
+# Output configs
+output:
+  path: vipe_results_chunked_robust_adaptive/
+  skip_exists: true
+  save_artifacts: true
+  save_slam_map: false
+  save_viz: true
+  viz_downsample: 4
+  viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]
+  save_slam_intermediate: false
+

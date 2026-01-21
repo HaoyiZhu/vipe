@@ -703,6 +703,86 @@ class Pi3XAdaptiveDepthProcessor(StreamProcessor):
 
             yield frame
 
+class Pi3XMetricDepthProcessor(StreamProcessor):
+    """
+    Compute metric depth per frame using Pi3X only (no SLAM map required).
+    Optionally conditions on intrinsics and poses if available.
+    """
+
+    def __init__(
+        self,
+        model: str = "yyfz233/Pi3X",
+        pixel_limit: int = 255000,
+        batch_size: int = 1,
+        use_poses: bool = True,
+    ) -> None:
+        super().__init__()
+        self.depth_model = Pi3XDepthModel(pretrained=model, pixel_limit=pixel_limit)
+        self.batch_size = max(1, int(batch_size))
+        self.use_poses = bool(use_poses)
+
+    def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
+        return previous_attributes | {FrameAttribute.METRIC_DEPTH}
+
+    def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
+        raise NotImplementedError("Pi3XMetricDepthProcessor should not be called directly.")
+
+    def _build_intrinsics(self, frames: list[VideoFrame], device: torch.device) -> torch.Tensor | None:
+        if any(frame.intrinsics is None for frame in frames):
+            return None
+        if any(frame.camera_type != CameraType.PINHOLE for frame in frames):
+            return None
+        intrinsics = []
+        for frame in frames:
+            fx, fy, cx, cy = unpack_optional(frame.intrinsics)[:4]
+            K = torch.eye(3, device=device)
+            K[0, 0] = fx
+            K[1, 1] = fy
+            K[0, 2] = cx
+            K[1, 2] = cy
+            intrinsics.append(K)
+        return torch.stack(intrinsics, dim=0)
+
+    def _build_poses(self, frames: list[VideoFrame], device: torch.device) -> torch.Tensor | None:
+        if not self.use_poses:
+            return None
+        if any(frame.pose is None for frame in frames):
+            return None
+        poses = [frame.pose.matrix().to(device) for frame in frames]
+        return torch.stack(poses, dim=0)
+
+    def _estimate_batch(self, frames: list[VideoFrame]) -> Iterator[VideoFrame]:
+        if not frames:
+            return iter(())
+
+        rgb = torch.stack([frame.rgb for frame in frames], dim=0).float().cuda()
+        intrinsics = self._build_intrinsics(frames, rgb.device)
+        poses = self._build_poses(frames, rgb.device)
+
+        depth_result = self.depth_model.estimate(
+            DepthEstimationInput(
+                rgb=rgb,
+                intrinsics=intrinsics,
+                poses=poses,
+            )
+        )
+        metric_depth = depth_result.metric_depth
+
+        for idx, frame in enumerate(frames):
+            if metric_depth is not None:
+                frame.metric_depth = metric_depth[idx].to(frame.rgb.device)
+            yield frame
+
+    def update_iterator(self, previous_iterator: Iterator[VideoFrame], pass_idx: int) -> Iterator[VideoFrame]:
+        batch: list[VideoFrame] = []
+        for frame in previous_iterator:
+            batch.append(frame)
+            if len(batch) >= self.batch_size:
+                yield from self._estimate_batch(batch)
+                batch = []
+        if batch:
+            yield from self._estimate_batch(batch)
+
 class MultiviewDepthProcessor(StreamProcessor):
     """
     Use multi-view depth model (e.g. DAv3, MapAnything, CAPA) to estimate depth map for each frame.
@@ -1112,6 +1192,8 @@ class Pi3XMoGePerFrameProcessor(StreamProcessor):
         shift_z_clamp: tuple[float, float] = (-1e3, 1e3),
         moge_bs: int = 4,
         align_source: str = "moge2",  # moge2 | slam_map
+        max_window_align_points: int = 2000,
+        max_frame_align_points: int = 2000,
     ) -> None:
         super().__init__()
         self.slam_output = slam_output
@@ -1127,6 +1209,8 @@ class Pi3XMoGePerFrameProcessor(StreamProcessor):
         self.shift_z_clamp = shift_z_clamp
         self.moge_bs = max(1, int(moge_bs))
         self.align_source = align_source
+        self.max_window_align_points = max(0, int(max_window_align_points))
+        self.max_frame_align_points = max(0, int(max_frame_align_points))
         # We only apply scale to Pi3X (Pi3X is scale-invariant); z-shift is used only to make the
         # scale estimation robust when MoGe2 has an additive depth offset.
         self._cache_scale: torch.Tensor | None = None
@@ -1141,6 +1225,13 @@ class Pi3XMoGePerFrameProcessor(StreamProcessor):
 
         if align_points_scale_z_shift is None:
             raise ImportError("align_points_scale_z_shift not found. Check moge import.")
+
+    def _effective_align_size(self, base_size: int, max_points: int, multiplier: int = 1) -> int:
+        if max_points <= 0:
+            return base_size
+        max_points = max(1, int(max_points // max(1, multiplier)))
+        limit = max(4, int(math.sqrt(max_points)))
+        return min(base_size, limit)
 
     def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
         return previous_attributes | {FrameAttribute.METRIC_DEPTH}
@@ -1293,6 +1384,9 @@ class Pi3XMoGePerFrameProcessor(StreamProcessor):
                 window_shared_scale: torch.Tensor | None = None
                 window_shared_shift_z: torch.Tensor | None = None
                 if self.align_mode in ("window_shared", "window_shared_ema"):
+                    window_align_size = self._effective_align_size(
+                        self.align_lr_size, self.max_window_align_points, len(current_window)
+                    )
                     pts_src_all = []
                     pts_tgt_all = []
                     w_all = []
@@ -1318,7 +1412,7 @@ class Pi3XMoGePerFrameProcessor(StreamProcessor):
                             if combined_mask.sum().item() < self.min_align_points:
                                 continue
                             indices, lr_mask = mask_aware_nearest_resize_robust(
-                                combined_mask, self.align_lr_size, self.align_lr_size
+                                combined_mask, window_align_size, window_align_size
                             )
                             ni, nj = indices
                             if lr_mask.sum().item() < 10:
@@ -1335,7 +1429,7 @@ class Pi3XMoGePerFrameProcessor(StreamProcessor):
                         if combined_mask.sum().item() < self.min_align_points:
                             continue
                         indices, lr_mask = mask_aware_nearest_resize_robust(
-                            combined_mask, self.align_lr_size, self.align_lr_size
+                            combined_mask, window_align_size, window_align_size
                         )
                         ni, nj = indices
                         if lr_mask.sum().item() < 10:
@@ -1392,7 +1486,12 @@ class Pi3XMoGePerFrameProcessor(StreamProcessor):
                         sw_depth[i] = d_up
                         continue
 
-                    indices, lr_mask = mask_aware_nearest_resize_robust(combined_mask, self.align_lr_size, self.align_lr_size)
+                    frame_align_size = self._effective_align_size(
+                        self.align_lr_size, self.max_frame_align_points, 1
+                    )
+                    indices, lr_mask = mask_aware_nearest_resize_robust(
+                        combined_mask, frame_align_size, frame_align_size
+                    )
                     ni, nj = indices
                     if lr_mask.sum().item() < 10:
                         d = (pi3x_pts[i, ..., 2].clamp(min=0.0) * pi3x_conf[i].float())
@@ -1417,10 +1516,13 @@ class Pi3XMoGePerFrameProcessor(StreamProcessor):
                         scale_i, shiftz_i = window_shared_scale, window_shared_shift_z
                     else:
                         try:
+                            src_sel = pts_pi3x_lr[lr_mask]
+                            tgt_sel = pts_tgt_lr[lr_mask]
+                            w_sel = w[lr_mask]
                             scale, shift = align_points_scale_z_shift(
-                                pts_pi3x_lr[lr_mask].unsqueeze(0),
-                                pts_tgt_lr[lr_mask].unsqueeze(0),
-                                w[lr_mask].unsqueeze(0),
+                                src_sel.unsqueeze(0),
+                                tgt_sel.unsqueeze(0),
+                                w_sel.unsqueeze(0),
                             )
                             scale_i = scale[0].clamp(self.scale_clamp[0], self.scale_clamp[1])
                             shiftz_i = shift[0, 2].clamp(self.shift_z_clamp[0], self.shift_z_clamp[1])

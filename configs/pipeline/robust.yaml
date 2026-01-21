@@ -1,0 +1,108 @@
+defaults:
+  - /slam: default # cotracker3_masked
+
+instance: vipe.pipeline.robust.RobustAnnotationPipeline
+
+# Init configs
+init:
+  camera_type: "pinhole"
+  intrinsics: "geocalib"
+  instance:
+    kf_gap_sec: 2.0
+    phrases:
+      - person
+      - animal
+      - vehicle
+      - ball
+      - balloon
+      - gun
+      - pet
+      - car
+      - bus
+    add_sky: true
+  pose_init:
+    name: "pi3x_vo"
+    enabled: true
+    model: "yyfz233/Pi3X"
+    chunk_size: 64
+    overlap: 32
+    conf_thre: 0.05
+    dtype: "bf16"
+    pose_convention: "c2w"
+    with_depth: false
+    depth_conf_thre: null
+
+robust:
+  pose_guard:
+    enabled: true
+    max_translation: 2.5
+    max_rotation_deg: 25.0
+    max_outlier_ratio: 0.2
+    max_consecutive_outliers: 5
+    max_missing_ratio: 0.1
+    min_pairs: 5
+    drop_depth_on_reject: false
+  slam_guard:
+    enabled: true
+    max_ba_residual: 0.005
+    min_valid_mask_ratio: 0.05
+    min_mean_valid_mask_ratio: 0.1
+    fail_on_ba_residual: true
+    fail_on_mask_low: true
+    skip_slam_if_mask_low: true
+  fallback:
+    enabled: true
+    fallback_on_slam_guard: true
+    force_pi3x_only: false
+    require_pose_guard_accept: true
+    require_pose: true
+    use_pi3x_depth: true
+    force_pi3x_depth: false
+    pi3x_model: "yyfz233/Pi3X"
+    pixel_limit: 255000
+    depth_batch_size: 32
+    use_poses: true
+
+slam:
+  keyframe_thresh: 1.0
+  keyframe_depth: pi3x_moge # unidepth-l
+  optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
+
+# Post-processing configs
+post:
+  depth_align_model: "pi3x_moge_perframe"
+  pixel_limit: 255000
+  window_size: 64
+  overlap_size: 16
+  # Alignment settings
+  align_lr_size: 64
+  min_align_points: 200
+  # Consistency: use a window-shared affine (scale+z-shift) with EMA smoothing.
+  align_mode: "window_shared_ema"
+  align_momentum: 0.99
+  scale_clamp: [0.1, 10.0]
+  shift_z_clamp: [-1000.0, 1000.0]
+  # Alignment target: use SLAM map points instead of MoGe2 per-frame points.
+  align_source: "slam_map"
+  # Run MoGe2 in small batches to avoid 32-bit indexing limits inside convs.
+  moge_bs: 16
+
+# Output configs
+output:
+  # Path to save results
+  path: vipe_results/
+  skip_exists: true
+
+  # Save artifacts and a info file
+  save_artifacts: true
+
+  # Save reconstruction from SLAM
+  save_slam_map: false
+
+  # Visualization videos to BASE_PATH/vipe/xxx.mp4
+  save_viz: true
+  viz_downsample: 4
+  viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]
+
+  save_slam_intermediate: true
+

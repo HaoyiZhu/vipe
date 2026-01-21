@@ -1,0 +1,130 @@
+defaults:
+  - /slam: default
+
+instance: vipe.pipeline.clip_repair.ClipRepairAnnotationPipeline
+
+# Init configs
+init:
+  camera_type: "pinhole"
+  intrinsics: "geocalib"
+  instance:
+    kf_gap_sec: 2.0
+    phrases:
+      - person
+      - animal
+      - vehicle
+      - ball
+      - balloon
+      - gun
+      - pet
+      - car
+      - bus
+    add_sky: true
+  pose_init:
+    name: "pi3x_vo"
+    enabled: true
+    model: "yyfz233/Pi3X"
+    chunk_size: 64
+    overlap: 32
+    conf_thre: 0.05
+    dtype: "bf16"
+    pose_convention: "c2w"
+    with_depth: false
+    depth_conf_thre: null
+
+# Clip repair config
+clip:
+  detect:
+    enabled: true
+    min_mask_ratio: 0.05
+    min_mask_mean_ratio: 0.1
+    use_pose_jump: true
+    pose_jump_translation: 2.5
+    pose_jump_rotation_deg: 25.0
+    window: 5
+    min_len: 1
+    expand: 10
+    merge_gap: 5
+    use_slam_depth_error: false
+    slam_depth_error_thresh: 0.2
+    slam_depth_error_window: 5
+    slam_depth_min_points: 30
+    slam_depth_error_lr_size: 64
+    use_slam_ba_residuals: true
+    slam_ba_residual_thresh: 0.005
+    slam_ba_residual_window: 5
+    use_global_ba_residual: false
+    global_ba_residual_thresh: 0.005
+  align_overlap: 10
+  align_lr_size: 64
+  min_align_points: 50
+  pi3x_vo_enabled: true
+  pi3x_model: "yyfz233/Pi3X"
+  pixel_limit: 255000
+  depth_batch_size: 8
+
+  sparse_ba:
+    enabled: true
+    use_sim3: false
+    min_tracks: 30
+    min_points: 30
+    min_frame_gap: 10
+    max_frame_gap: 200
+    max_edges: 100
+    max_iterations: 30
+    lambda_init: 1e-6
+    track_quality:
+      enabled: true
+      min_tracks_per_frame: 10
+      min_total_tracks: 100
+      min_mean_tracks: 10
+      min_median_tracks: 10
+      min_track_coverage: 0.5
+    tracks:
+      name: cotracker3_masked
+      precompute: true
+      valid_mask_only: true
+      min_valid_ratio: 0.05
+      min_valid_pixels: 1000
+      grid_size: 16
+      visibility_thre: 0.5
+      device: "cuda"
+      online: false
+      chunk_size: 64
+      overlap: 48
+      stitch_tracks: true
+
+slam:
+  keyframe_thresh: 1.0
+  keyframe_depth: pi3x_moge # unidepth-l
+  optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
+  compute_ba_residuals_per_frame: true
+
+# Post-processing configs (for good frames)
+post:
+  depth_align_model: "pi3x_moge_perframe"
+  pixel_limit: 255000
+  window_size: 64
+  overlap_size: 16
+  align_lr_size: 64
+  min_align_points: 200
+  align_mode: "window_shared_ema"
+  align_momentum: 0.99
+  scale_clamp: [0.1, 10.0]
+  shift_z_clamp: [-1000.0, 1000.0]
+  align_source: "slam_map"
+  moge_bs: 16
+  max_window_align_points: 2000
+  max_frame_align_points: 2000
+
+# Output configs
+output:
+  path: vipe_results_clip_repair_ba_perframe_sparse_ba/
+  skip_exists: true
+  save_artifacts: true
+  save_slam_map: false
+  save_viz: true
+  viz_downsample: 4
+  viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]
+  save_slam_intermediate: false
+

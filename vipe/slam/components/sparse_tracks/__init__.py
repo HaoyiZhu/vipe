@@ -256,4 +256,33 @@ def build_sparse_tracks(config: DictConfig, n_views: int) -> SparseTracks:
             npz_out_dir=config.get("npz_out_dir", "vipe_debug/cotracker_npz"),
         )
 
+    if config.name == "cotracker3_masked":
+        from .cotracker_masked import CoTrackerSparseTracksMasked
+
+        return CoTrackerSparseTracksMasked(
+            n_views,
+            model_name=config.get("model_name", "cotracker3_offline"),
+            grid_size=config.get("grid_size", 12),
+            visibility_thre=config.get("visibility_thre", 0.5),
+            device=config.get("device", "cuda"),
+            online=config.get("online", False),
+            step=config.get("step", 8),
+            chunk_size=config.get("chunk_size", 256),
+            overlap=config.get("overlap", 32),
+            valid_mask_only=config.get("valid_mask_only", False),
+            min_valid_ratio=config.get("min_valid_ratio", 0.05),
+            min_valid_pixels=config.get("min_valid_pixels", 1000),
+            save_vis=config.get("save_vis", False),
+            vis_out_dir=config.get("vis_out_dir", "vipe_debug/cotracker"),
+            vis_stride=config.get("vis_stride", 5),
+            vis_query_frame=config.get("vis_query_frame", 0),
+            vis_fps=config.get("vis_fps", 10),
+            vis_max_points=config.get("vis_max_points", 2000),
+            stitch_tracks=config.get("stitch_tracks", True),
+            stitch_max_dist=config.get("stitch_max_dist", 5.0),
+            stitch_min_frames=config.get("stitch_min_frames", 3),
+            save_npz=config.get("save_npz", False),
+            npz_out_dir=config.get("npz_out_dir", "vipe_debug/cotracker_npz"),
+        )
+
     raise ValueError(f"Unknown sparse tracks: {config.name}")

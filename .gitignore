@@ -185,3 +185,4 @@ configs/slam/reduce_jumps.yaml
 configs/slam/debug_jump.yaml
 configs/slam/reduce_jumps_conservative.yaml
 weights
+vipe_results*/

@@ -333,10 +333,13 @@ class SLAMSystem:
             [resizer.recover_intrinsics(self.buffer.intrinsics[v]) for v, resizer in enumerate(resizers)]
         )
 
-        return SLAMOutput(
+        slam_output = SLAMOutput(
             trajectory=filled_return.poses.inv(),
             intrinsics=original_intrinsics,
             rig=SE3(self.buffer.rig.clone()),
             slam_map=slam_map,
             ba_residual=self.buffer.ba_residual,
         )
+        if self.backend.last_ba_residuals_per_frame is not None:
+            slam_output.metrics["ba_residuals_per_frame"] = self.backend.last_ba_residuals_per_frame
+        return slam_output
