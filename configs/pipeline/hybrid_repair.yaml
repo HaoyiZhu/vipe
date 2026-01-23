@@ -1,0 +1,92 @@
+defaults:
+  - /slam: default
+
+instance: vipe.pipeline.hybrid_repair.HybridRepairAnnotationPipeline
+
+# Init configs
+init:
+  camera_type: "pinhole"
+  intrinsics: "geocalib"
+  instance:
+    kf_gap_sec: 2.0
+    phrases:
+      - person
+      - animal
+      - vehicle
+      - ball
+      - balloon
+      - gun
+      - pet
+      - car
+      - bus
+    add_sky: true
+  pose_init:
+    name: "pi3x_vo"
+    enabled: true
+    model: "yyfz233/Pi3X"
+    chunk_size: 64
+    overlap: 32
+    conf_thre: 0.05
+    dtype: "bf16"
+    pose_convention: "c2w"
+    with_depth: false
+    depth_conf_thre: null
+
+# Clip repair config - Conservative but catches real issues
+clip:
+  detect:
+    enabled: true
+    # Detect significant discontinuities
+    severe_trans_jump: 5.0    # 5 meters - catches frames with > 5m jumps
+    severe_rot_jump: 45.0     # 45 degrees - catches severe rotation jumps
+    min_mask_ratio: 0.01      # Very low mask
+    min_consecutive: 3        # At least 3 frames
+    expand: 10                # Expand detected region
+    merge_gap: 20             # Merge nearby bad regions
+  
+  # Alignment settings
+  align_overlap: 15
+  min_scale: 0.1
+  max_scale: 10.0
+  
+  # Validation - only apply repair if it's clearly better
+  validate_repair: true
+  
+  # Pi3X settings
+  pi3x_model: "yyfz233/Pi3X"
+  pixel_limit: 255000
+  depth_batch_size: 8
+
+slam:
+  keyframe_thresh: 1.0
+  keyframe_depth: pi3x_moge
+  optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
+  compute_ba_residuals_per_frame: false
+
+# Post-processing configs
+post:
+  depth_align_model: "pi3x_moge_perframe"
+  pixel_limit: 255000
+  window_size: 64
+  overlap_size: 16
+  align_lr_size: 64
+  min_align_points: 200
+  align_mode: "window_shared_ema"
+  align_momentum: 0.99
+  scale_clamp: [0.1, 10.0]
+  shift_z_clamp: [-1000.0, 1000.0]
+  align_source: "slam_map"
+  moge_bs: 16
+  max_window_align_points: 2000
+  max_frame_align_points: 2000
+
+# Output configs
+output:
+  path: vipe_results_hybrid_repair/
+  skip_exists: false
+  save_artifacts: true
+  save_slam_map: false
+  save_viz: true
+  viz_downsample: 4
+  viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]
+  save_slam_intermediate: false

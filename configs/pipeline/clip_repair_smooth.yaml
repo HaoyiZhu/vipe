@@ -1,0 +1,96 @@
+defaults:
+  - /slam: default
+
+instance: vipe.pipeline.clip_repair_smooth.ClipRepairSmoothAnnotationPipeline
+
+# Init configs
+init:
+  camera_type: "pinhole"
+  intrinsics: "geocalib"
+  instance:
+    kf_gap_sec: 2.0
+    phrases:
+      - person
+      - animal
+      - vehicle
+      - ball
+      - balloon
+      - gun
+      - pet
+      - car
+      - bus
+    add_sky: true
+  pose_init:
+    name: "pi3x_vo"
+    enabled: true
+    model: "yyfz233/Pi3X"
+    chunk_size: 64
+    overlap: 32
+    conf_thre: 0.05
+    dtype: "bf16"
+    pose_convention: "c2w"
+    with_depth: false
+    depth_conf_thre: null
+
+# Clip repair config
+clip:
+  detect:
+    enabled: true
+    min_mask_ratio: 0.05
+    min_mask_mean_ratio: 0.1
+    use_pose_jump: true
+    pose_jump_translation: 2.5
+    pose_jump_rotation_deg: 25.0
+    window: 5
+    min_len: 1
+    expand: 10
+    merge_gap: 5
+    use_slam_depth_error: false
+    use_slam_ba_residuals: true
+    slam_ba_residual_thresh: 0.005
+    slam_ba_residual_window: 5
+    use_global_ba_residual: false
+  align_overlap: 15
+  boundary_blend: 5
+  pi3x_vo_enabled: true
+  pi3x_model: "yyfz233/Pi3X"
+  pixel_limit: 255000
+  depth_batch_size: 8
+  use_interpolation_fallback: true
+
+  sparse_ba:
+    enabled: false
+
+slam:
+  keyframe_thresh: 1.0
+  keyframe_depth: pi3x_moge
+  optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
+  compute_ba_residuals_per_frame: true
+
+# Post-processing configs
+post:
+  depth_align_model: "pi3x_moge_perframe"
+  pixel_limit: 255000
+  window_size: 64
+  overlap_size: 16
+  align_lr_size: 64
+  min_align_points: 200
+  align_mode: "window_shared_ema"
+  align_momentum: 0.99
+  scale_clamp: [0.1, 10.0]
+  shift_z_clamp: [-1000.0, 1000.0]
+  align_source: "slam_map"
+  moge_bs: 16
+  max_window_align_points: 2000
+  max_frame_align_points: 2000
+
+# Output configs
+output:
+  path: vipe_results_clip_repair_smooth/
+  skip_exists: false
+  save_artifacts: true
+  save_slam_map: false
+  save_viz: true
+  viz_downsample: 4
+  viz_attributes: [['rgb', 'instance'], ['depth', 'pcd']]
+  save_slam_intermediate: false

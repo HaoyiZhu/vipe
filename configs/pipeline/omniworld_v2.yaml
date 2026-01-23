@@ -1,0 +1,70 @@
+instance: vipe.pipeline.omniworld_v2.OmniWorldPipelineV2
+
+# SLAM configuration with CoTracker3 sparse tracks
+slam:
+  buffer: 1024
+  beta: 0.3
+  filter_thresh: 2.4
+  warmup: 8
+  keyframe_thresh: 1.0
+  frontend_thresh: 16.0
+  frontend_window: 25
+  frontend_radius: 2
+  frontend_nms: 1
+  seq_init: true
+  frontend_backend_iters: [16, 64, 256]
+  backend_thresh: 22.0
+  backend_radius: 2
+  backend_nms: 3
+  backend_iters: 24
+  init_disp: 1.0
+  # CANNOT optimize intrinsics when GT depth is provided
+  # (depth and intrinsics are coupled in the optimization)
+  optimize_intrinsics: false
+  optimize_rig_rotation: false
+  cross_view: true
+  cross_view_idx: null
+  adaptive_cross_view: false
+  infill_chunk_size: 16
+  infill_dense_disp: false
+  map_filter_thresh: 0.05
+  visualize: false
+  # No keyframe depth model - we use GT depth
+  keyframe_depth: null
+  # CoTracker3 settings
+  cotracker_grid_size: 20  # 20x20 = 400 points per grid
+  sparse_tracks_min_gap: 50
+  sparse_tracks_max_edges: 100
+  ba:
+    dense_disp_alpha: 0.001
+    sparse_tracks_gap_thresh: 10
+  sparse_tracks:
+    name: cotracker3
+    grid_size: 20
+    chunk_size: 256
+    overlap: 32
+    visibility_thre: 0.5
+    stitch_tracks: true
+    valid_mask_only: true  # Only track in valid regions (static background with valid depth)
+    min_valid_ratio: 0.05
+    min_valid_pixels: 1000
+
+# Depth scale estimation - scale only, no shift
+depth_scale:
+  enabled: true
+  model: "Ruicheng/moge-2-vitl"
+  frame_step: 2  # Compute scale every 2 frames
+
+# Intrinsics stabilization
+intrinsics:
+  stabilize: true
+  variance_threshold: 0.01
+
+# Output configs
+output:
+  path: vipe_results_omniworld_v2/
+  skip_exists: false
+  save_artifacts: true
+  save_viz: true
+  viz_downsample: 2
+  viz_attributes: ["rgb", "depth"]

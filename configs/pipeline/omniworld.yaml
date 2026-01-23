@@ -1,0 +1,60 @@
+instance: vipe.pipeline.omniworld.OmniWorldAnnotationPipeline
+
+# SLAM configuration (includes defaults from slam/default.yaml)
+slam:
+  buffer: 1024
+  beta: 0.3
+  filter_thresh: 2.4
+  warmup: 8
+  keyframe_thresh: 1.0
+  frontend_thresh: 16.0
+  frontend_window: 25
+  frontend_radius: 2
+  frontend_nms: 1
+  seq_init: true
+  frontend_backend_iters: [16, 64, 256]
+  backend_thresh: 22.0
+  backend_radius: 2
+  backend_nms: 3
+  backend_iters: 24
+  init_disp: 1.0
+  optimize_intrinsics: false  # Cannot optimize intrinsics when using GT depth
+  optimize_rig_rotation: false
+  cross_view: true
+  cross_view_idx: null
+  adaptive_cross_view: false
+  infill_chunk_size: 16
+  infill_dense_disp: false
+  map_filter_thresh: 0.05
+  visualize: false
+  keyframe_depth: metric3d-small  # Will be overridden with GT depth
+  sparse_tracks_min_gap: 50
+  sparse_tracks_max_edges: 100
+  ba:
+    dense_disp_alpha: 0.001
+    sparse_tracks_gap_thresh: 10
+  sparse_tracks:
+    name: dummy
+
+# Depth scale estimation using MoGe2 with proper point cloud alignment
+depth_scale:
+  enabled: true
+  model: "Ruicheng/moge-2-vitl"
+  pixel_limit: 255000
+  keyframe_gap: 10
+  align_lr_size: 64  # Resize to 64x64 for alignment
+  min_align_points: 200
+
+# Intrinsics stabilization
+intrinsics:
+  stabilize: true
+  variance_threshold: 0.01
+
+# Output configs
+output:
+  path: vipe_results_omniworld/
+  skip_exists: true
+  save_artifacts: true
+  save_viz: true  # Save visualization video
+  viz_downsample: 2
+  viz_attributes: ["rgb", "depth"]
