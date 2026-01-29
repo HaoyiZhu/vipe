@@ -195,9 +195,11 @@ def save_slam_intermediate_artifacts(out_path: ArtifactPath, slam_output: SLAMOu
       - inds: (N,) frame indices (0..N-1)
       - pose: (N, 4, 4) OpenCV cam2world matrices for the requested view
       - intrinsics: (4,) [fx, fy, cx, cy] for the requested view (as returned by SLAM)
+                    OR (N, 4) if per_frame_intrinsics=True
       - rig: (V, 4, 4) rig transforms (if available; identity for single view)
       - base_trajectory: (N, 4, 4) SLAM base trajectory (cam0) before applying rig
       - view_idx: scalar int
+      - per_frame_intrinsics: bool indicating if intrinsics are per-frame
     """
     n_frames = int(slam_output.trajectory.shape[0])
     inds = np.arange(n_frames, dtype=np.int64)
@@ -205,8 +207,13 @@ def save_slam_intermediate_artifacts(out_path: ArtifactPath, slam_output: SLAMOu
     pose_se3 = slam_output.get_view_trajectory(view_idx)
     pose = pose_se3.matrix().cpu().numpy()
 
-    intr = slam_output.intrinsics[view_idx].cpu().numpy()
-    intr = intr[:4]  # [fx, fy, cx, cy]
+    # Handle per-frame intrinsics
+    if slam_output.per_frame_intrinsics:
+        # intrinsics shape is (N, V, D)
+        intr = slam_output.intrinsics[:, view_idx, :4].cpu().numpy()  # (N, 4)
+    else:
+        # intrinsics shape is (V, D)
+        intr = slam_output.intrinsics[view_idx, :4].cpu().numpy()  # (4,)
 
     base_traj = slam_output.trajectory.matrix().cpu().numpy()
 
@@ -225,6 +232,7 @@ def save_slam_intermediate_artifacts(out_path: ArtifactPath, slam_output: SLAMOu
         rig=rig,
         base_trajectory=base_traj,
         view_idx=np.array(view_idx, dtype=np.int64),
+        per_frame_intrinsics=np.array(slam_output.per_frame_intrinsics, dtype=bool),
     )
 
 

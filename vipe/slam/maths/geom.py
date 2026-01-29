@@ -298,6 +298,125 @@ def iproj_i_proj_j_disp(
     return x1, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj)
 
 
+def iproj_i_proj_j_disp_preindexed_intrinsics(
+    poses: SE3,
+    disps: torch.Tensor,
+    disps_uv: torch.Tensor | None,
+    intrinsics_i: torch.Tensor,
+    intrinsics_j: torch.Tensor,
+    camera_type: CameraType,
+    rig: SE3,
+    pi: torch.Tensor,
+    pj: torch.Tensor,
+    qi: torch.Tensor,
+    qj: torch.Tensor,
+    di: torch.Tensor | None,
+    jacobian_p_d: bool,
+    jacobian_f: bool,
+    jacobian_r: bool,
+):
+    """
+    Same as iproj_i_proj_j_disp but with pre-indexed intrinsics.
+    
+    This is used for per-frame intrinsics optimization where intrinsics are already
+    indexed per-edge (M, D) instead of being indexed from a global tensor.
+
+    Args:
+        poses: (N, ) SE3 of inverse poses
+        disps: (NV/M, ...) tensor of disparities
+        disps_uv: (NV/M, ..., 2) tensor of uv coordinates (if None, disps must be dense_disps)
+        intrinsics_i: (M, 4+D) tensor of pre-indexed intrinsics for source edges
+        intrinsics_j: (M, 4+D) tensor of pre-indexed intrinsics for target edges
+        rig: (Q, ) SE3 of rig c2w poses
+        pi: (M,) tensor of indices for pose_i indexing in N space
+        pj: (M,) tensor of indices for pose_j indexing in N space
+        qi: (M,) tensor of indices for rig_qi indexing in Q space
+        qj: (M,) tensor of indices for rig_qj indexing in Q space
+        di: (M,) tensor of indices for dense_disp_i indexing in NV space
+            if None, disps/disps_uv must have leading dimension of M (i.e. n_terms).
+        jacobian_p_d: bool to compute jacobian of the dense_disps
+        jacobian_f: bool to compute jacobian of the focal/distortion
+        jacobian_r: bool to compute jacobian of the rig
+
+    Returns:
+        x1: (M, ..., 2) tensor of coordinates
+        valid: (M, ..., 1) tensor of valid points
+        (Ji, Jj, Jz): tuple of jacobian of the poses (M, ..., 2, 6), (M, ..., 2, 6), (M, ..., 2, 1)
+        (Jfi, Jfj): tuple of jacobian of the intrinsics (M, ..., 2, 1+D), (M, ..., 2, 1+D)
+        (Jri, Jrj): tuple of jacobian of the rig    (M, ..., 2, 6), (M, ..., 2, 6)
+    """
+    jacobian_p_d = jacobian_p_d or jacobian_f or jacobian_r
+
+    # Convert leading dimension from M to NV.
+    if di is not None:
+        disps = disps[di]
+        if disps_uv is not None:
+            disps_uv = disps_uv[di]
+
+    # inverse project (pinhole)
+    # X0 (n_terms, ..., 4)
+    # Jz = d(iproj_z)/dz = (n_terms, ..., 4)
+    # Jfi = d(iproj_z)/dfi = (n_terms, ..., 4, 1+D)
+    X0, Jz, Jfi = iproj_disp(
+        disps,
+        disps_uv,
+        intrinsics_i,  # Already pre-indexed
+        camera_type,
+        compute_jz=jacobian_p_d,
+        compute_jf=jacobian_f,
+    )
+
+    # transform
+    Gij = poses[pj] * poses[pi].inv()
+    T = rig[qj].inv() * Gij * rig[qi]  # type: ignore
+    assert T is not None
+    # X1 (n_terms, ..., 4), Ja = d(T*iproj_z)/dT = (n_terms, ..., 4, 6)
+    X1, Ja = actp(T, X0, compute_jp=jacobian_p_d)
+
+    # project (pinhole),
+    # Jp = d(proj)/d(T*iproj_z) = (n_terms, ..., 2, 4)
+    # Jfj = d(proj)/dfj = (n_terms, ..., 2, 1+D)
+    x1, Jp, Jfj = proj_points(X1, intrinsics_j, camera_type, compute_jp=jacobian_p_d, compute_jf=jacobian_f)
+
+    # exclude points too close to camera
+    valid = ((X1[..., 2] > BaseCameraModel.MIN_DEPTH) & (X0[..., 2] > BaseCameraModel.MIN_DEPTH)).float()
+    valid = valid.unsqueeze(-1)
+
+    # (Below we use the formula that T.adjT(Ji) = Ji @ Adj(T))
+    n_dot_dim = len(X0.shape) - 2
+    dot_indexing = (slice(None),) + (None,) * n_dot_dim
+    expanded_indexing = (slice(None),) + (None,) * (n_dot_dim + 1)
+
+    if jacobian_p_d:
+        # Ja now becomes d(T*iproj_z)/dGj
+        Ja = rig[qj].inv()[expanded_indexing].adjT(Ja)
+        # dproj/dGj = Jp * Ja
+        Jj = torch.matmul(Jp, Ja)  # type: ignore
+        # dproj/dGi = dproj/dT * Adj_(Rjinv Gj) * -Adj_iinv = -Jj @ Adj(Gij)
+        Ji = -Gij[expanded_indexing].adjT(Jj)  # type: ignore
+
+        # d(T*iproj_z)/dz = d(T*iproj_z)/d(iproj_z) * d(iproj_z)/dz
+        Jz = T[dot_indexing] * Jz
+        Jz = torch.matmul(Jp, Jz.unsqueeze(-1))  # type: ignore
+    else:
+        Ji = Jj = None
+
+    if jacobian_f:
+        # d(proj)/dfi = d(proj)/d(T*iproj_z) * d(T*iproj_z)/d(iproj_z) * d(iproj_z)/dfi
+        Jfi = T[expanded_indexing] * Jfi.transpose(-1, -2)
+        Jfi = torch.matmul(Jp, Jfi.transpose(-1, -2))  # type: ignore
+    else:
+        Jfi = Jfj = None
+
+    if jacobian_r:
+        # Rig should behave opposite to the poses
+        Jri, Jrj = -Ji, -Jj  # type: ignore
+    else:
+        Jri = Jrj = None
+
+    return x1, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj)
+
+
 def frame_distance_dense_disp(
     poses: SE3,
     dense_disps: torch.Tensor,

@@ -1,0 +1,45 @@
+# OmniWorld GT Depth with Per-Frame Intrinsics Test Pipeline
+# Uses VIPE's standard pipeline with OmniWorld's GT depth (scaled via MoGe2 alignment)
+# and per-frame intrinsics optimization
+
+defaults:
+  - /slam: default
+
+instance: vipe.pipeline.omniworld_gt_depth.OmniWorldGTDepthPipeline
+
+# Scale estimation settings (for computing metric scale via MoGe2)
+scale_estimation:
+  align_resolution: 64        # Resolution for point cloud alignment
+  moge_batch_size: 4          # Batch size for MoGe2 inference
+  focal_range: [20, 3000]     # Valid focal length range for "good" frames
+  outlier_std: 2.0            # Filter scales outside median +/- 2*std
+
+# Init configs
+init:
+  camera_type: "pinhole"
+  # Skip instance segmentation for faster testing
+  instance: null
+
+# SLAM configs
+slam:
+  keyframe_depth: null           # Depth comes from stream (GT depth)
+  optimize_intrinsics: true      # Enable intrinsics optimization
+  per_frame_intrinsics: true     # Enable per-frame intrinsics
+  keyframe_thresh: 1.0
+  sparse_tracks:
+    name: dummy
+
+# Post-processing configs
+post:
+  depth_align_model: null        # Skip depth alignment - use GT depth as-is
+
+# Output configs
+output:
+  path: vipe_results_omniworld_gt_depth_perframe_intr/
+  skip_exists: false
+  save_artifacts: true
+  save_viz: true
+  viz_downsample: 2
+  viz_attributes: [["rgb", "depth"]]
+  save_slam_intermediate: true
+  save_slam_map: false

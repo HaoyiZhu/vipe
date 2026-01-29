@@ -1,0 +1,45 @@
+# OmniWorld Sliding Window Pipeline
+# Used for large-scale annotation with sliding window chunks
+# Uses GT depth (scaled via MoGe2 alignment) and per-frame intrinsics optimization
+
+defaults:
+  - /slam: default
+
+instance: vipe.pipeline.omniworld_gt_depth.OmniWorldGTDepthPipeline
+
+# Scale estimation settings (for computing metric scale via MoGe2)
+scale_estimation:
+  align_resolution: 64        # Resolution for point cloud alignment
+  moge_batch_size: 4          # Batch size for MoGe2 inference
+  focal_range: [20, 3000]     # Valid focal length range for "good" frames
+  outlier_std: 2.0            # Filter scales outside median +/- 2*std
+
+# Init configs
+init:
+  camera_type: "pinhole"
+  # Skip instance segmentation for production annotation
+  instance: null
+
+# SLAM configs
+slam:
+  keyframe_depth: null           # Depth comes from stream (GT depth)
+  optimize_intrinsics: true      # Enable intrinsics optimization
+  per_frame_intrinsics: true     # Enable per-frame intrinsics
+  keyframe_thresh: 1.0
+  sparse_tracks:
+    name: dummy
+
+# Post-processing configs
+post:
+  depth_align_model: null        # Skip depth alignment - use GT depth as-is
+
+# Output configs
+output:
+  path: ???                      # Will be overridden by script
+  skip_exists: true              # Skip already processed chunks
+  save_artifacts: true
+  save_viz: false                # Disable viz for production
+  viz_downsample: 4
+  viz_attributes: [["rgb", "depth"]]
+  save_slam_intermediate: true   # Save intermediate results for debugging
+  save_slam_map: false           # Skip slam map to save space

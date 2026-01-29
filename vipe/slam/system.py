@@ -105,6 +105,7 @@ class SLAMSystem:
             sparse_tracks=self.sparse_tracks,
             camera_type=self.config.camera_type,
             device=self.device,
+            per_frame_intrinsics=self.config.get("per_frame_intrinsics", False),
         )
         self.buffer.rig[:] = self.rig.to(self.device).data
         self.motion_filter = MotionFilter(
@@ -158,13 +159,22 @@ class SLAMSystem:
             self.buffer.masks[kf_idx] = buffer_masks
 
         for view_idx, frame_data in enumerate(frame_data_list):
-            if kf_idx == 0:
+            # Handle intrinsics based on per_frame_intrinsics mode
+            if self.buffer.per_frame_intrinsics:
+                # Store intrinsics for each keyframe
+                self.buffer.intrinsics[kf_idx, view_idx] = unpack_optional(frame_data.intrinsics)
+            elif kf_idx == 0:
+                # For global intrinsics, only set on first keyframe
                 self.buffer.intrinsics[view_idx] = unpack_optional(frame_data.intrinsics)
 
             if frame_data.metric_depth is not None:
                 disp_sens = frame_data.metric_depth[3::8, 3::8]
                 disp_sens = torch.where(disp_sens > 0, disp_sens.reciprocal(), disp_sens)
-                assert not self.config.optimize_intrinsics
+                # Note: When using GT depth with intrinsics optimization, depth and intrinsics
+                # are coupled. Ensure the depth is already in metric scale.
+                if self.config.optimize_intrinsics and kf_idx == 0:
+                    logger.warning("Using GT metric_depth with optimize_intrinsics=True. "
+                                   "Ensure depth is in correct metric scale.")
                 self.buffer.disps_sens[kf_idx, view_idx] = disp_sens
 
             if frame_data.pose is not None and phase == 1:
@@ -329,9 +339,26 @@ class SLAMSystem:
         slam_map.backend_graph = self.backend.last_graph
 
         # Scale back the intrinsics to the original size.
-        original_intrinsics = torch.stack(
-            [resizer.recover_intrinsics(self.buffer.intrinsics[v]) for v, resizer in enumerate(resizers)]
-        )
+        if self.buffer.per_frame_intrinsics:
+            # For per-frame intrinsics, use the filled intrinsics from InnerFiller
+            if filled_return.intrinsics is not None:
+                # filled_return.intrinsics is (N, V, D)
+                original_intrinsics = torch.stack([
+                    torch.stack([
+                        resizer.recover_intrinsics(filled_return.intrinsics[n, v])
+                        for v, resizer in enumerate(resizers)
+                    ])
+                    for n in range(filled_return.intrinsics.shape[0])
+                ])  # (N, V, D)
+            else:
+                # Fallback: use first keyframe intrinsics for all frames
+                original_intrinsics = torch.stack(
+                    [resizer.recover_intrinsics(self.buffer.intrinsics[0, v]) for v, resizer in enumerate(resizers)]
+                )
+        else:
+            original_intrinsics = torch.stack(
+                [resizer.recover_intrinsics(self.buffer.intrinsics[v]) for v, resizer in enumerate(resizers)]
+            )
 
         slam_output = SLAMOutput(
             trajectory=filled_return.poses.inv(),
@@ -339,6 +366,7 @@ class SLAMSystem:
             rig=SE3(self.buffer.rig.clone()),
             slam_map=slam_map,
             ba_residual=self.buffer.ba_residual,
+            per_frame_intrinsics=self.buffer.per_frame_intrinsics,
         )
         if self.backend.last_ba_residuals_per_frame is not None:
             slam_output.metrics["ba_residuals_per_frame"] = self.backend.last_ba_residuals_per_frame

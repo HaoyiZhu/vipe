@@ -60,6 +60,7 @@ class GraphBuffer:
         sparse_tracks: SparseTracks,
         camera_type: CameraType,
         device: torch.device = torch.device("cuda"),
+        per_frame_intrinsics: bool = False,
     ):
         if cross_view_idx is None:
             cross_view_idx = [(i + 1) % n_views for i in range(n_views)]
@@ -69,10 +70,12 @@ class GraphBuffer:
         self.height = height
         self.width = width
         self.n_views = n_views
+        self.buffer_size = buffer_size
         self.device = device
         self.ba_config = ba_config
         self.sparse_tracks = sparse_tracks
         self.camera_type = camera_type
+        self.per_frame_intrinsics = per_frame_intrinsics
 
         assert self.height % 8 == 0 and self.width % 8 == 0
 
@@ -92,13 +95,22 @@ class GraphBuffer:
         # Rig pose defined as the 0-th view of each frame.
         self.poses = torch.zeros(buffer_size, 7, device=device, dtype=torch.float)
         self.poses[:] = torch.as_tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.poses.device)
-        # This will be the original intrinsics
-        self.intrinsics = torch.zeros(
-            self.n_views,
-            self.camera_type.intrinsics_dim(),
-            device=device,
-            dtype=torch.float,
-        )
+        # Intrinsics storage: either per-view (V, D) or per-frame (N, V, D)
+        if per_frame_intrinsics:
+            self.intrinsics = torch.zeros(
+                buffer_size,
+                self.n_views,
+                self.camera_type.intrinsics_dim(),
+                device=device,
+                dtype=torch.float,
+            )
+        else:
+            self.intrinsics = torch.zeros(
+                self.n_views,
+                self.camera_type.intrinsics_dim(),
+                device=device,
+                dtype=torch.float,
+            )
         # rig pose in a multi-view setting.
         self.rig = torch.zeros(self.n_views, 7, device=device, dtype=torch.float)
         self.rig[:] = torch.as_tensor([0, 0, 0, 0, 0, 0, 1], dtype=torch.float, device=self.rig.device)
@@ -203,8 +215,64 @@ class GraphBuffer:
         return rearrange(self.inps, "n v c h w -> (n v) c h w")
 
     @property
+    def flattened_intrinsics(self) -> torch.Tensor:
+        """
+        Returns intrinsics flattened to (N*V, D) if per_frame_intrinsics, else (V, D).
+        """
+        if self.per_frame_intrinsics:
+            return rearrange(self.intrinsics, "n v d -> (n v) d")
+        else:
+            return self.intrinsics
+
+    def get_intrinsics(self, frame_idx: int | torch.Tensor, view_idx: int | torch.Tensor) -> torch.Tensor:
+        """
+        Get intrinsics for a specific frame and view.
+        
+        Args:
+            frame_idx: Frame index (scalar or tensor)
+            view_idx: View index (scalar or tensor)
+            
+        Returns:
+            Intrinsics tensor of shape (D,) or (N, D) depending on input shape
+        """
+        if self.per_frame_intrinsics:
+            return self.intrinsics[frame_idx, view_idx]
+        else:
+            return self.intrinsics[view_idx]
+
+    def get_intrinsics_idx(self, frame_idx: torch.Tensor, view_idx: torch.Tensor) -> torch.Tensor:
+        """
+        Get flat intrinsics index for BA optimization.
+        
+        Args:
+            frame_idx: (M,) tensor of frame indices
+            view_idx: (M,) tensor of view indices
+            
+        Returns:
+            (M,) tensor of flat intrinsics indices
+        """
+        if self.per_frame_intrinsics:
+            return frame_idx * self.n_views + view_idx
+        else:
+            return view_idx
+
+    def get_ba_intrinsics(self) -> torch.Tensor:
+        """
+        Get intrinsics tensor in the format expected by BA.
+        
+        Returns:
+            (N*V, D) if per_frame_intrinsics, else (V, D)
+        """
+        return self.flattened_intrinsics
+
+    @property
     def K(self) -> np.ndarray:
-        intr_np = self.camera_type.build_camera_model(self.intrinsics).pinhole().intrinsics.cpu().numpy()
+        """Get camera matrix for visualization (uses first frame if per_frame_intrinsics)."""
+        if self.per_frame_intrinsics:
+            intr = self.intrinsics[0]  # Use first frame for visualization
+        else:
+            intr = self.intrinsics
+        intr_np = self.camera_type.build_camera_model(intr).pinhole().intrinsics.cpu().numpy()
         k_mat = np.eye(3)[None].repeat(self.n_views, axis=0)
         k_mat[:, 0, 0] = intr_np[:, 0]
         k_mat[:, 1, 1] = intr_np[:, 1]
@@ -232,7 +300,16 @@ class GraphBuffer:
         self.fmaps[ix] = self.fmaps[ix + 1]
         self.masks[ix] = self.masks[ix + 1]
         self.cross_view_idx[ix] = self.cross_view_idx[ix + 1]
+        if self.per_frame_intrinsics:
+            self.intrinsics[ix] = self.intrinsics[ix + 1]
         self.n_frames -= 1
+
+    def _get_frame_intrinsics_for_depth(self, frame_idx: int) -> torch.Tensor:
+        """Get intrinsics for a frame in the format expected by depth model."""
+        if self.per_frame_intrinsics:
+            return self.intrinsics[frame_idx]  # (V, D)
+        else:
+            return self.intrinsics  # (V, D)
 
     def update_disps_sens(self, depth_model: DepthEstimationModel | None, frame_idx: int | None):
         if depth_model is None:
@@ -244,11 +321,17 @@ class GraphBuffer:
         else:
             # Update all frames for backend.
             assert self.last_depth_intrinsics is not None
-            if torch.allclose(self.last_depth_intrinsics, self.intrinsics):
-                return
+            # For per-frame intrinsics, we need to check if any intrinsics changed
+            if self.per_frame_intrinsics:
+                if torch.allclose(self.last_depth_intrinsics[:self.n_frames], self.intrinsics[:self.n_frames]):
+                    return
+            else:
+                if torch.allclose(self.last_depth_intrinsics, self.intrinsics):
+                    return
             # If we can update in an easier way, do it.
-            if depth_model.depth_type == DepthType.METRIC_DEPTH:
+            if depth_model.depth_type == DepthType.METRIC_DEPTH and not self.per_frame_intrinsics:
                 # Depth is already estimated and we can simply do the scaling
+                # Note: This shortcut only works for global intrinsics
                 self.disps_sens[: self.n_frames] *= (
                     self.last_depth_intrinsics[0][0].item() / self.intrinsics[0][0].item()
                 )
@@ -263,7 +346,8 @@ class GraphBuffer:
             assert isinstance(depth_model, (Pi3XDepthModel, Pi3XMoGeV2Model)), "Only Pi3X supports multi-view depth for now"
 
         for frame_idx in frames_to_update:
-            intrinsics = self.camera_type.build_camera_model(self.intrinsics).pinhole().intrinsics
+            frame_intr = self._get_frame_intrinsics_for_depth(frame_idx)
+            intrinsics = self.camera_type.build_camera_model(frame_intr).pinhole().intrinsics
             if self.n_views > 1:
                 intrinsics_to_pass = torch.eye(3, device=self.device)[None].repeat(self.n_views, 1, 1)
                 intrinsics_to_pass[:, 0, 0] = intrinsics[:, 0]
@@ -432,6 +516,16 @@ class GraphBuffer:
         pi, qi, di, pj, qj, dj = self.expand_edge_multiview(ii, jj)
         di_unique = torch.unique(di)
         pi_unique = torch.unique(ii)  # Should be equivalent to unique(pi)
+        
+        # Compute intrinsics indices based on per_frame_intrinsics mode
+        if self.per_frame_intrinsics:
+            # For per-frame intrinsics: index = frame_idx * n_views + view_idx
+            intr_i_inds = self.get_intrinsics_idx(pi, qi)
+            intr_j_inds = self.get_intrinsics_idx(pj, qj)
+        else:
+            # For global intrinsics: index = view_idx (same as rig)
+            intr_i_inds = None  # Will fall back to rig indices in BA term
+            intr_j_inds = None
 
         # Compute frame gap for each edge (before multiview expansion)
         frame_gaps = torch.abs(ii - jj).float()
@@ -463,6 +557,8 @@ class GraphBuffer:
                 rig=None,
                 image_size=(self.height // 8, self.width // 8),
                 camera_type=self.camera_type,
+                intrinsics_i_inds=intr_i_inds,
+                intrinsics_j_inds=intr_j_inds,
             )
         )
 
@@ -494,6 +590,8 @@ class GraphBuffer:
                     rig=None,
                     image_size=(self.height // 8, self.width // 8),
                     camera_type=self.camera_type,
+                    intrinsics_i_inds=intr_i_inds,
+                    intrinsics_j_inds=intr_j_inds,
                 ),
                 kernel=HuberRobustKernel(),
             )
@@ -556,6 +654,9 @@ class GraphBuffer:
             solver.set_fixed("rig", torch.zeros(1, device=self.device).long())
 
         disps_flattened = rearrange(self.flattened_disps, "nv h w -> nv (h w)")
+        
+        # Get intrinsics in the format expected by BA (flattened for per-frame mode)
+        ba_intrinsics = self.get_ba_intrinsics()
 
         ba_energy = []
         for _ in range(n_iters):
@@ -563,7 +664,7 @@ class GraphBuffer:
                 {
                     "pose": SE3(self.poses),
                     "dense_disp": disps_flattened,
-                    "intrinsics": self.intrinsics,
+                    "intrinsics": ba_intrinsics,
                     "rig": SE3(self.rig),
                 }
             )
@@ -597,22 +698,47 @@ class GraphBuffer:
         ii, jj = ii.reshape(-1), jj.reshape(-1)
         pi, qi, di, pj, qj, _ = self.expand_edge_multiview(ii, jj)
         assert self.disps is not None and self.intrinsics is not None
-        coords, valid_mask, _, _, _ = geom.iproj_i_proj_j_disp(
-            SE3(self.poses),
-            self.flattened_disps,
-            None,
-            self.camera_type.build_camera_model(self.intrinsics).scaled(1 / 8.0).intrinsics,
-            self.camera_type,
-            SE3(self.rig),
-            pi,
-            pj,
-            qi,
-            qj,
-            di,
-            jacobian_p_d=False,
-            jacobian_f=False,
-            jacobian_r=False,
-        )
+        
+        if self.per_frame_intrinsics:
+            # For per-frame intrinsics, we pre-index and use the new function
+            intrinsics_i = self.get_intrinsics(pi, qi)
+            intrinsics_j = self.get_intrinsics(pj, qj)
+            scaled_intr_i = self.camera_type.build_camera_model(intrinsics_i).scaled(1 / 8.0).intrinsics
+            scaled_intr_j = self.camera_type.build_camera_model(intrinsics_j).scaled(1 / 8.0).intrinsics
+            coords, valid_mask, _, _, _ = geom.iproj_i_proj_j_disp_preindexed_intrinsics(
+                SE3(self.poses),
+                self.flattened_disps,
+                None,
+                scaled_intr_i,
+                scaled_intr_j,
+                self.camera_type,
+                SE3(self.rig),
+                pi,
+                pj,
+                qi,
+                qj,
+                di,
+                jacobian_p_d=False,
+                jacobian_f=False,
+                jacobian_r=False,
+            )
+        else:
+            coords, valid_mask, _, _, _ = geom.iproj_i_proj_j_disp(
+                SE3(self.poses),
+                self.flattened_disps,
+                None,
+                self.camera_type.build_camera_model(self.intrinsics).scaled(1 / 8.0).intrinsics,
+                self.camera_type,
+                SE3(self.rig),
+                pi,
+                pj,
+                qi,
+                qj,
+                di,
+                jacobian_p_d=False,
+                jacobian_f=False,
+                jacobian_r=False,
+            )
         return coords, valid_mask
 
     def frame_distance_dense_disp(
@@ -626,7 +752,13 @@ class GraphBuffer:
         """frame distance metric"""
         pi, qi, di, pj, qj, dj = self.expand_edge_multiview(ii, jj, cross=False, view_offset=view_offset)
         poses = self.poses[: self.n_frames]
-        intrinsics = self.camera_type.build_camera_model(self.intrinsics).scaled(1 / 8.0).intrinsics
+        
+        # For frame distance, use first frame's intrinsics as reference (for relative comparison)
+        if self.per_frame_intrinsics:
+            ref_intrinsics = self.intrinsics[0]  # (V, D)
+        else:
+            ref_intrinsics = self.intrinsics
+        intrinsics = self.camera_type.build_camera_model(ref_intrinsics).scaled(1 / 8.0).intrinsics
 
         d = geom.frame_distance_dense_disp(
             SE3(poses),
@@ -677,11 +809,24 @@ class GraphBuffer:
         for v in range(self.n_views):
             c2w_view: SE3 = c2w_se3 * SE3(self.rig[v])[None]  # type: ignore
             disps_v = self.disps[t_range, v].contiguous()  # (n_frames, ht, wd)
-            camera_model = self.camera_type.build_camera_model(self.intrinsics[v])
+            
+            # Handle per-frame intrinsics
+            if self.per_frame_intrinsics:
+                # Get intrinsics for each frame in t_range
+                frame_intrinsics = self.intrinsics[t_range, v]  # (n_frames, D)
+                camera_model = self.camera_type.build_camera_model(frame_intrinsics)
+                scaled_intrinsics = camera_model.scaled(1 / 8.0).intrinsics  # (n_frames, D)
+                # For depth filter, use first frame's intrinsics as reference
+                ref_camera_model = self.camera_type.build_camera_model(self.intrinsics[t_range[0], v])
+            else:
+                camera_model = self.camera_type.build_camera_model(self.intrinsics[v])
+                scaled_intrinsics = camera_model.scaled(1 / 8.0).intrinsics[None].expand((n_frames, -1))
+                ref_camera_model = camera_model
+            
             pts, _, _ = geom.iproj_disp(
                 disps_v,
                 None,
-                camera_model.scaled(1 / 8.0).intrinsics[None].expand((n_frames, -1)),
+                scaled_intrinsics,
                 camera_type=self.camera_type,
             )
             if not is_local:
@@ -693,7 +838,7 @@ class GraphBuffer:
             count = slam_ext.depth_filter(
                 c2w_view.inv().data,
                 disps_v,
-                camera_model.pinhole().intrinsics / 8.0,
+                ref_camera_model.pinhole().intrinsics / 8.0,
                 torch.arange(n_frames, device=self.device),
                 torch.full((n_frames,), filter_thresh_v, device=self.device),
             )

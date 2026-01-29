@@ -116,6 +116,8 @@ class DenseDepthFlowTerm(SolverTerm):
         rig: SE3 | None,
         image_size: tuple[int, int],
         camera_type: CameraType,
+        intrinsics_i_inds: torch.Tensor | None = None,
+        intrinsics_j_inds: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
 
@@ -133,6 +135,11 @@ class DenseDepthFlowTerm(SolverTerm):
         self.dense_disp_i_inds = dense_disp_i_inds
         self.image_size = image_size
         self.camera_type = camera_type
+        
+        # Intrinsics indices: use separate indices if provided, otherwise fall back to rig indices
+        # This enables per-frame intrinsics optimization where intrinsics are indexed by frame*n_views + view
+        self.intrinsics_i_inds = intrinsics_i_inds if intrinsics_i_inds is not None else rig_i_inds
+        self.intrinsics_j_inds = intrinsics_j_inds if intrinsics_j_inds is not None else rig_j_inds
 
         n_pixels = image_size[0] * image_size[1]
 
@@ -171,15 +178,26 @@ class DenseDepthFlowTerm(SolverTerm):
 
         assert isinstance(pose, SE3) and isinstance(dense_disp, torch.Tensor)
         assert dense_disp.shape[1] == self.image_size[0] * self.image_size[1]
-        assert intrinsics.shape[0] == rig.shape[0]
+        # Note: For per-frame intrinsics, intrinsics.shape[0] may be N*V while rig.shape[0] is V
+        # so we skip this assertion when per-frame intrinsics is used
+        if self.intrinsics_i_inds is self.rig_i_inds:
+            assert intrinsics.shape[0] == rig.shape[0]
 
         camera_model_cls = self.camera_type.camera_model_cls()
+        
+        # For per-frame intrinsics, we pre-index the intrinsics here
+        # This creates per-edge intrinsics tensors that are then used in the geometry function
+        intrinsics_i = intrinsics[self.intrinsics_i_inds]  # (n_terms, D)
+        intrinsics_j = intrinsics[self.intrinsics_j_inds]  # (n_terms, D)
+        scaled_intrinsics_i = camera_model_cls(intrinsics_i).scaled(1.0 / self.intrinsics_factor).intrinsics
+        scaled_intrinsics_j = camera_model_cls(intrinsics_j).scaled(1.0 / self.intrinsics_factor).intrinsics
 
-        coords, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj) = geom.iproj_i_proj_j_disp(
+        coords, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj) = geom.iproj_i_proj_j_disp_preindexed_intrinsics(
             pose,
             dense_disp.view(-1, self.image_size[0], self.image_size[1]),
             None,
-            (camera_model_cls(intrinsics).scaled(1.0 / self.intrinsics_factor).intrinsics),
+            scaled_intrinsics_i,
+            scaled_intrinsics_j,
             self.camera_type,
             rig,
             self.pose_i_inds,
@@ -220,7 +238,7 @@ class DenseDepthFlowTerm(SolverTerm):
                 Jfj = rearrange(Jfj, "n h w c d -> n (h w c) d", c=2)
                 J_dict["intrinsics"] = SparseDenseBlockMatrix(
                     i_inds=torch.cat([term_inds, term_inds]),
-                    j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
+                    j_inds=torch.cat([self.intrinsics_i_inds, self.intrinsics_j_inds]),
                     data=camera_model_cls.J_scale(
                         1.0 / self.intrinsics_factor,
                         torch.cat([Jfi, Jfj], dim=0),
@@ -327,6 +345,8 @@ class TracksFlowTerm(SolverTerm):
         intrinsics: torch.Tensor | None,
         rig: SE3,
         camera_type: CameraType,
+        intrinsics_i_inds: torch.Tensor | None = None,
+        intrinsics_j_inds: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
 
@@ -343,6 +363,10 @@ class TracksFlowTerm(SolverTerm):
         self.rig_j_inds = rig_j_inds
         self.tracks_i_inds = tracks_i_inds
         self.camera_type = camera_type
+        
+        # Intrinsics indices: use separate indices if provided, otherwise fall back to rig indices
+        self.intrinsics_i_inds = intrinsics_i_inds if intrinsics_i_inds is not None else rig_i_inds
+        self.intrinsics_j_inds = intrinsics_j_inds if intrinsics_j_inds is not None else rig_j_inds
 
         self.target = target.reshape(self.n_terms, -1, 2)  # (n_terms, n_tracks, 2)
         self.weight = weight.reshape(self.n_terms, -1, 2)  # (n_terms, n_tracks, 2)
@@ -377,13 +401,20 @@ class TracksFlowTerm(SolverTerm):
 
         assert isinstance(pose, SE3) and isinstance(tracks_disp, torch.Tensor)
         assert tracks_disp.shape[1] == self.n_tracks
-        assert intrinsics.shape[0] == self.rig.shape[0]
+        # Skip assertion for per-frame intrinsics
+        if self.intrinsics_i_inds is self.rig_i_inds:
+            assert intrinsics.shape[0] == self.rig.shape[0]
 
-        coords, valid, (Ji, Jj, Jz), (Jfi, Jfj), _ = geom.iproj_i_proj_j_disp(
+        # Pre-index intrinsics for per-frame support
+        intrinsics_i = intrinsics[self.intrinsics_i_inds]
+        intrinsics_j = intrinsics[self.intrinsics_j_inds]
+
+        coords, valid, (Ji, Jj, Jz), (Jfi, Jfj), _ = geom.iproj_i_proj_j_disp_preindexed_intrinsics(
             pose,
             tracks_disp,
             self.tracks_uv,
-            intrinsics,
+            intrinsics_i,
+            intrinsics_j,
             self.camera_type,
             self.rig,
             self.pose_i_inds,
@@ -422,7 +453,7 @@ class TracksFlowTerm(SolverTerm):
                 Jfj = rearrange(Jfj, "n t c d -> n (t c) d", c=2)
                 J_dict["intrinsics"] = SparseDenseBlockMatrix(
                     i_inds=torch.cat([term_inds, term_inds]),
-                    j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
+                    j_inds=torch.cat([self.intrinsics_i_inds, self.intrinsics_j_inds]),
                     data=torch.cat([Jfi, Jfj], dim=0),
                 )
 

@@ -186,3 +186,17 @@ configs/slam/debug_jump.yaml
 configs/slam/reduce_jumps_conservative.yaml
 weights
 vipe_results*/
+
+# OmniWorld data symlinks
+OmniWorld-Game
+OmniWorld-Game-vipe-test
+
+# Cursor IDE
+.cursor/
+
+# SLURM generated files
+slurm/omniworld/jobs/
+slurm/omniworld/logs/
+slurm/omniworld/status/
+slurm/omniworld/chunk_list.json
+slurm/omniworld_test/

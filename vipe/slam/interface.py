@@ -187,7 +187,7 @@ class SLAMMap:
 @dataclass(kw_only=True)
 class SLAMOutput:
     trajectory: SE3  # (N,)
-    intrinsics: torch.Tensor  # (V, 4)
+    intrinsics: torch.Tensor  # (V, D) for global, (N, V, D) for per-frame
 
     rig: SE3 | None = None  # (V,)
     slam_map: SLAMMap | None = None
@@ -195,6 +195,9 @@ class SLAMOutput:
     # Residual of BA (unit is pixel/diagonal) -- average num of pixels/diagonal between predicted and observed flows
     # Should be of range [0, 1]
     ba_residual: float = 0.0
+    
+    # Whether intrinsics are per-frame (N, V, D) or global (V, D)
+    per_frame_intrinsics: bool = False
 
     metrics: dict[str, Any] = field(default_factory=dict)
 
@@ -206,3 +209,20 @@ class SLAMOutput:
     def get_view_trajectory(self, view_idx: int) -> SE3:
         assert self.rig is not None, "Rig not available."
         return self.trajectory * self.rig[view_idx][None]  # type: ignore
+
+    def get_intrinsics(self, frame_idx: int | None = None, view_idx: int = 0) -> torch.Tensor:
+        """
+        Get intrinsics for a specific frame and view.
+        
+        Args:
+            frame_idx: Frame index (required if per_frame_intrinsics=True)
+            view_idx: View index (default: 0)
+            
+        Returns:
+            Intrinsics tensor of shape (D,)
+        """
+        if self.per_frame_intrinsics:
+            assert frame_idx is not None, "frame_idx required for per-frame intrinsics"
+            return self.intrinsics[frame_idx, view_idx]
+        else:
+            return self.intrinsics[view_idx]

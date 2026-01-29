@@ -1,0 +1,25 @@
+# OmniWorld GT Depth Stream Config
+# Loads RGB + GT depth from OmniWorld dataset
+
+instance: vipe.streams.omniworld_stream.OmniWorldGTDepthStreamList
+
+# Path to extracted OmniWorld-Game data
+base_path: ???
+
+# Scene ID (e.g., "b04f88d1f85a")
+scene_id: ???
+
+# Split index (0-indexed)
+split_idx: 0
+
+# Metric scale (computed via MoGe2 alignment, or use default 1.0)
+# This is typically computed by the pipeline, but can be overridden
+metric_scale: 1.0
+
+# Frame range
+frame_start: 0
+frame_end: -1     # -1 means all frames
+frame_skip: 1
+
+# Cache frames in memory
+cached: false

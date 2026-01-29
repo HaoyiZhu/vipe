@@ -108,11 +108,16 @@ class DefaultAnnotationPipeline(Pipeline):
     def _add_post_processors(
         self, view_idx: int, video_stream: VideoStream, slam_output: SLAMOutput
     ) -> ProcessedVideoStream:
+        if slam_output.per_frame_intrinsics:
+            intrinsics_list = list(slam_output.intrinsics[:, view_idx])
+        else:
+            intrinsics_list = [slam_output.intrinsics[view_idx]] * len(video_stream)
+
         post_processors: list[StreamProcessor] = [
             AssignAttributesProcessor(
                 {
                     FrameAttribute.POSE: slam_output.get_view_trajectory(view_idx),  # type: ignore
-                    FrameAttribute.INTRINSICS: [slam_output.intrinsics[view_idx]] * len(video_stream),
+                    FrameAttribute.INTRINSICS: intrinsics_list,
                 }
             )
         ]

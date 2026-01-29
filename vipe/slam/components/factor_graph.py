@@ -355,6 +355,7 @@ class FactorGraph:
         motion_only: bool = False,
         fixed_motion: bool = False,
         limited_disp: bool = False,
+        optimize_intrinsics: bool = False,
     ):
         """run update operator on factor graph"""
         assert self.incremental
@@ -430,7 +431,7 @@ class FactorGraph:
                 pose_ep=0.1,
                 motion_only=motion_only,
                 limited_disp=limited_disp,
-                optimize_intrinsics=False,
+                optimize_intrinsics=optimize_intrinsics,
                 optimize_rig_rotation=False,
                 verbose=False,
             )

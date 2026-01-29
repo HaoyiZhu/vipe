@@ -36,6 +36,7 @@ from .factor_graph import FactorGraph
 class FilledReturn:
     poses: SE3  # Inverse of c2w
     dense_disps: torch.Tensor | None = None
+    intrinsics: torch.Tensor | None = None  # (N, V, D) for per-frame intrinsics
 
     def scale(self, factor: float):
         self.poses.data[..., :3] *= factor
@@ -44,7 +45,7 @@ class FilledReturn:
 
 
 class InnerFiller:
-    """This class is used to fill in non-keyframe poses"""
+    """This class is used to fill in non-keyframe poses (and intrinsics when per_frame_intrinsics is enabled)"""
 
     def __init__(self, net: DroidNet, video: GraphBuffer, args: DictConfig, device: torch.device):
         self.video = video
@@ -55,6 +56,7 @@ class InnerFiller:
 
         self.filled_poses = []
         self.filled_dense_disps = []
+        self.filled_intrinsics = []
 
     def set_start_idx(self, start_idx: int):
         self.start_idx = start_idx
@@ -91,6 +93,14 @@ class InnerFiller:
                 self.video.disps[self.start_idx : total_frames],
             )
 
+        # Interpolate intrinsics for per-frame intrinsics mode
+        if self.video.per_frame_intrinsics:
+            # Linear interpolation of intrinsics between keyframes
+            n_intrinsics = self.video.intrinsics[: self.start_idx]  # (N_kf, V, D)
+            interp_weight = ((m_tstamp - n_tstamp[t0]) / d_time).unsqueeze(-1).unsqueeze(-1)  # (M, 1, 1)
+            m_intrinsics = (1 - interp_weight) * n_intrinsics[t0] + interp_weight * n_intrinsics[t1]
+            self.video.intrinsics[self.start_idx : total_frames] = m_intrinsics
+
         # Build factor graph and optimize for the interpolated information.
         graph = FactorGraph(
             self.net,
@@ -108,12 +118,19 @@ class InnerFiller:
             graph.add_factors(infill_inds, t0)
             graph.add_factors(infill_inds, t1)
 
+        # Determine if we should optimize intrinsics during infill
+        optimize_intrinsics_in_infill = (
+            self.video.per_frame_intrinsics and 
+            self.args.get("per_frame_intrinsics", False)
+        )
+
         for _ in range(10):
             graph.update(
                 self.start_idx,
                 total_frames,
                 motion_only=not self.args.infill_dense_disp,
                 limited_disp=True,
+                optimize_intrinsics=optimize_intrinsics_in_infill,
             )
 
         # (Optional) Metric computation of keyframe optimized disp and its original disp.
@@ -130,10 +147,16 @@ class InnerFiller:
             current_dense_disps = self.video.disps[self.start_idx : total_frames].clone()
             self.filled_dense_disps.append(current_dense_disps)
 
+        # Store filled intrinsics for per-frame mode
+        if self.video.per_frame_intrinsics:
+            current_intrinsics = self.video.intrinsics[self.start_idx : total_frames].clone()
+            self.filled_intrinsics.append(current_intrinsics)
+
         self.video.n_frames = self.start_idx
 
     def get_result(self) -> FilledReturn:
         return FilledReturn(
             poses=lt.cat(self.filled_poses, dim=0),
             dense_disps=(torch.cat(self.filled_dense_disps, dim=0) if self.filled_dense_disps else None),
+            intrinsics=(torch.cat(self.filled_intrinsics, dim=0) if self.filled_intrinsics else None),
         )

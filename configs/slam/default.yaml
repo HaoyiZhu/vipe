@@ -27,6 +27,9 @@ backend_iters: 24
 init_disp: 1.0
 # Whether to optimize intrinsics
 optimize_intrinsics: ???
+# Whether to use per-frame intrinsics (instead of global intrinsics)
+# When true, each frame has its own intrinsics that are optimized independently
+per_frame_intrinsics: false
 # Whether to optimize rig
 optimize_rig_rotation: false
 # Whether add reproj factors for cross-views

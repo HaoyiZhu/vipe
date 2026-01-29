@@ -569,11 +569,16 @@ class ChunkedRobustAnnotationPipeline(RobustAnnotationPipeline):
     ) -> ProcessedVideoStream:
         post_processors = []
         if assign_pose:
+            if slam_output.per_frame_intrinsics:
+                intrinsics_list = list(slam_output.intrinsics[:, view_idx])
+            else:
+                intrinsics_list = [slam_output.intrinsics[view_idx]] * len(video_stream)
+
             post_processors.append(
                 AssignAttributesProcessor(
                     {
                         FrameAttribute.POSE: slam_output.get_view_trajectory(view_idx),  # type: ignore
-                        FrameAttribute.INTRINSICS: [slam_output.intrinsics[view_idx]] * len(video_stream),
+                        FrameAttribute.INTRINSICS: intrinsics_list,
                     }
                 )
             )
@@ -1383,13 +1388,18 @@ class ChunkedRobustAnnotationPipeline(RobustAnnotationPipeline):
             assert cached_init_stream is not None
             slam_pipeline = SLAMSystem(device=torch.device("cuda"), config=self.slam_cfg)
             global_slam_output = slam_pipeline.run([cached_init_stream], rig=slam_rig, camera_type=self.camera_type)
+            if global_slam_output.per_frame_intrinsics:
+                intrinsics_list = list(global_slam_output.intrinsics[:, 0])
+            else:
+                intrinsics_list = [global_slam_output.intrinsics[0]] * len(cached_init_stream)
+
             global_pose_stream = ProcessedVideoStream(
                 cached_init_stream,
                 [
                     AssignAttributesProcessor(
                         {
                             FrameAttribute.POSE: global_slam_output.get_view_trajectory(0),  # type: ignore
-                            FrameAttribute.INTRINSICS: [global_slam_output.intrinsics[0]] * len(cached_init_stream),
+                            FrameAttribute.INTRINSICS: intrinsics_list,
                         }
                     )
                 ],
