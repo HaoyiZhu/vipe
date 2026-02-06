@@ -34,9 +34,9 @@ CHUNK_CACHE="$SCRIPT_DIR/chunk_list.json"
 DRY_RUN=false
 FORCE=false
 RECOMPUTE_CHUNKS=false
-CHUNKS_PER_JOB=400
-WINDOW_SIZE=960
-OVERLAP=480
+CHUNKS_PER_JOB=300
+WINDOW_SIZE=961
+OVERLAP=640
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -246,6 +246,9 @@ for ((job_idx=0; job_idx<NUM_JOBS; job_idx++)); do
     sed -e "s/GROUP_ID/${group_id}/g" \
         -e "s/CHUNK_START/${chunk_start}/g" \
         -e "s/CHUNK_END/${chunk_end}/g" \
+        -e "s/__CHUNKS_PER_JOB__/${CHUNKS_PER_JOB}/g" \
+        -e "s/__WINDOW_SIZE__/${WINDOW_SIZE}/g" \
+        -e "s/__OVERLAP__/${OVERLAP}/g" \
         "$TEMPLATE" > "$job_script"
     chmod +x "$job_script"
     
