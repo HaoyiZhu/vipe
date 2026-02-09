@@ -36,7 +36,7 @@ TEMPLATE="$SCRIPT_DIR/job_template.sh"
 DRY_RUN=false
 FORCE=false
 RECOMPUTE_LISTS=false
-VIDEOS_PER_GROUP=200
+VIDEOS_PER_GROUP=1600
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do

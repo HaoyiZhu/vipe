@@ -4,7 +4,7 @@
 #SBATCH -t 04:00:00
 #SBATCH -N 1
 #SBATCH --gpus-per-node 8
-#SBATCH --array=1-10%1
+#SBATCH --array=1-20%1
 #SBATCH -J VIPE:Sekai-__GROUP_ID__
 #SBATCH -o logs/sekai___GROUP_ID___%A_%a.out
 #SBATCH -e logs/sekai___GROUP_ID___%A_%a.err
