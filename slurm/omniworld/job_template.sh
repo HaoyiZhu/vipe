@@ -18,7 +18,7 @@
 # ============================================================================
 
 # --- 1. Environment Setup ---
-export MYHOME="/lustre/fs12/portfolios/nvr/projects/nvr_elm_llm/users/haozhu"
+export MYHOME="$HOME"
 MINIFORGE_ROOT="$MYHOME/miniforge3"
 source "$MINIFORGE_ROOT/etc/profile.d/conda.sh"
 

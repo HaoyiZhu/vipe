@@ -13,9 +13,9 @@
 # --- 1. Environment Setup ---
 # Explicitly point to your Mamba install
 
-export MYHOME="/lustre/fsw/portfolios/nvr/users/haozhu"
+export MYHOME="$HOME"
 
-MINIFORGE_ROOT="/lustre/fsw/portfolios/nvr/users/haozhu/miniforge3"
+MINIFORGE_ROOT="$MYHOME/miniforge3"
 source "$MINIFORGE_ROOT/etc/profile.d/conda.sh"
 
 conda activate vipe

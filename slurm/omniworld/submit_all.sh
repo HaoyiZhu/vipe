@@ -23,7 +23,7 @@ set -e
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
-DATA_ROOT="/lustre/fs12/portfolios/nvr/projects/nvr_elm_llm/users/haozhu/data/OmniWorld-Game"
+DATA_ROOT="$HOME/data/OmniWorld-Game"
 JOBS_DIR="$SCRIPT_DIR/jobs"
 STATUS_DIR="$SCRIPT_DIR/status"
 LOGS_DIR="$SCRIPT_DIR/logs"

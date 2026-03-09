@@ -24,7 +24,7 @@ set -e
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
-MYHOME="/lustre/fs12/portfolios/nvr/projects/nvr_elm_llm/users/haozhu"
+MYHOME="$HOME"
 DATA_DIR="$MYHOME/data/sekai-real-walking-hq"
 OUTPUT_ROOT="$DATA_DIR/vipe_results"
 JOBS_DIR="$SCRIPT_DIR/jobs"
