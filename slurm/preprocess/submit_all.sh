@@ -22,18 +22,10 @@ ZIPS_PER_JOB="${1:-5}"
 
 mkdir -p "$LISTS_DIR" "$LOG_DIR" "$OUTPUT_DIR/.staging"
 
-# ── Clean up old incomplete staging (no manifest = was interrupted) ──
-echo "Cleaning incomplete staging zips..."
-cleaned=0
-for z in "$OUTPUT_DIR/.staging/"*.zip; do
-    [ -f "$z" ] || continue
-    base="$(basename "$z" .zip)"
-    if [ ! -f "$OUTPUT_DIR/.staging/${base}_manifest.json" ]; then
-        rm -f "$z"
-        cleaned=$((cleaned + 1))
-    fi
-done
-echo "  Removed $cleaned incomplete staging zips"
+# ── Check staging status ──
+n_done=$(find "$OUTPUT_DIR/.staging" -name "_manifest.json" 2>/dev/null | wc -l)
+n_partial=$(find "$OUTPUT_DIR/.staging" -name "_done_videos.txt" 2>/dev/null | wc -l)
+echo "Staging status: $n_done fully done, $n_partial with checkpoints (will resume)"
 
 # ── Discover input zips ──
 mapfile -t ALL_ZIPS < <(ls "$INPUT_DIR"/*.zip 2>/dev/null | xargs -n1 basename | sort)

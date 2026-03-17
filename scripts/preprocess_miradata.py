@@ -4,15 +4,16 @@ Preprocess miradata: split videos by scene cuts, filter by quality/length,
 normalize to 16fps, and package into output zips (max 10k clips each).
 
 Two-phase architecture:
-  Phase 1 (parallel): Workers process input zips into per-zip staging zips
-  Phase 2 (sequential): Merge staging zips into final output zips with clip limit
+  Phase 1 (parallel): Workers process input zips into per-zip staging directories
+                       with per-video checkpointing for crash-safe resume.
+  Phase 2 (sequential): Package staging dirs into final output zips with clip limit.
 """
 
 import argparse
-import glob
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -53,11 +54,9 @@ def parse_args():
     p.add_argument("--phase", choices=["1", "2", "all"], default="all",
                    help="Run phase 1 (process), 2 (package), or all")
     p.add_argument("--zip-list", type=str, default=None,
-                   help="File listing zip basenames to process (one per line), "
-                        "for distributed Phase 1")
+                   help="File listing zip basenames to process (one per line)")
     p.add_argument("--tmp-dir", type=str, default=None,
-                   help="Directory for temp files (default: system temp). "
-                        "Use local SSD like /tmp on cluster nodes.")
+                   help="Local temp dir for ffmpeg I/O (e.g. /tmp)")
     return p.parse_args()
 
 
@@ -83,54 +82,24 @@ def load_json(path):
 
 def get_frame_count(video_path):
     """Return frame count via ffprobe, or None on failure."""
-    # Method 1: container metadata (instant)
-    try:
-        r = subprocess.run(
-            [
-                "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=nb_frames", "-of", "csv=p=0",
-                video_path,
-            ],
-            capture_output=True, text=True, timeout=60,
-        )
-        if r.returncode == 0:
-            v = r.stdout.strip()
-            if v and v != "N/A":
-                return int(v)
-    except Exception:
-        pass
-    # Method 2: count packets without decoding (fast)
-    try:
-        r = subprocess.run(
-            [
-                "ffprobe", "-v", "error", "-count_packets",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0",
-                video_path,
-            ],
-            capture_output=True, text=True, timeout=120,
-        )
-        if r.returncode == 0:
-            v = r.stdout.strip()
-            if v and v != "N/A":
-                return int(v)
-    except Exception:
-        pass
-    # Method 3: full decode count (slow, last resort)
-    try:
-        r = subprocess.run(
-            [
-                "ffprobe", "-v", "error", "-count_frames",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0",
-                video_path,
-            ],
-            capture_output=True, text=True, timeout=600,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            return int(r.stdout.strip())
-    except Exception:
-        pass
+    for method in (
+        ["-show_entries", "stream=nb_frames"],
+        ["-count_packets", "-show_entries", "stream=nb_read_packets"],
+        ["-count_frames", "-show_entries", "stream=nb_read_frames"],
+    ):
+        timeout = 600 if "-count_frames" in method else 120
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0"]
+                + method + ["-of", "csv=p=0", video_path],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            if r.returncode == 0:
+                v = r.stdout.strip()
+                if v and v != "N/A":
+                    return int(v)
+        except Exception:
+            pass
     return None
 
 
@@ -138,11 +107,8 @@ def ffmpeg_cut(input_path, output_path, start_sec, target_frames, target_fps,
                source_fps):
     """
     Extract exactly *target_frames* frames starting at *start_sec*.
-
-    Fast path (stream copy) is attempted when source fps matches target fps.
-    Falls back to libx264 re-encode if the copy produces the wrong frame count.
-
-    Returns the actual frame count of the output file.
+    Tries stream copy first for matching fps, falls back to re-encode.
+    Returns the actual frame count.
     """
     same_fps = abs(source_fps - target_fps) < 0.5
 
@@ -180,10 +146,7 @@ def ffmpeg_cut(input_path, output_path, start_sec, target_frames, target_fps,
         raise RuntimeError(f"ffmpeg: {r.stderr[:500]}")
 
     actual = get_frame_count(output_path)
-    if actual is not None:
-        return actual
-    # ffmpeg succeeded with -frames:v N -- trust it
-    return target_frames
+    return actual if actual is not None else target_frames
 
 
 def build_clip_metadata(orig_meta, actual_frames, fps):
@@ -200,21 +163,42 @@ def build_clip_metadata(orig_meta, actual_frames, fps):
     return meta
 
 
+def _original_clip_id(new_id):
+    """Extract the original clip_id from an output clip name.
+    '8720.0_s2_w0' -> '8720.0',  '1032.13_s0' -> '1032.13'"""
+    return re.sub(r"_s\d+(_w\d+)?$", "", new_id)
+
+
 # ---------------------------------------------------------------------------
-# Phase 1 – parallel per-zip processing
+# Phase 1 – parallel per-zip processing with per-video checkpointing
 # ---------------------------------------------------------------------------
 
 def process_one_zip(args):
-    """Process a single input zip → staging zip + manifest + score files."""
+    """
+    Process a single input zip into a staging directory of individual files.
+    Checkpoints after every video so interrupted jobs lose at most one video's work.
+    """
     zip_path, input_dir, staging_dir, config = args
     base = Path(zip_path).stem
 
-    manifest_path = os.path.join(staging_dir, f"{base}_manifest.json")
+    stg_dir = os.path.join(staging_dir, base)
+    os.makedirs(stg_dir, exist_ok=True)
+
+    manifest_path = os.path.join(stg_dir, "_manifest.json")
+    checkpoint_path = os.path.join(stg_dir, "_done_videos.txt")
+
+    # Already fully done?
     if config.get("resume") and os.path.isfile(manifest_path):
-        stg = os.path.join(staging_dir, f"{base}.zip")
-        if os.path.isfile(stg):
-            logger.info(f"[{base}] Skipping (resume)")
-            return base
+        logger.info(f"[{base}] Skipping (fully done)")
+        return base
+
+    # Load checkpoint: set of original clip_ids already processed
+    done_videos = set()
+    if config.get("resume") and os.path.isfile(checkpoint_path):
+        with open(checkpoint_path) as f:
+            done_videos = {line.strip() for line in f if line.strip()}
+        if done_videos:
+            logger.info(f"[{base}] Resuming: {len(done_videos)} videos already done")
 
     logger.info(f"[{base}] Starting")
 
@@ -235,12 +219,9 @@ def process_one_zip(args):
     stride = config["stride"]
     dover_thresh = config["dover_threshold"]
 
-    stg_zip_path = os.path.join(staging_dir, f"{base}.zip")
-    manifest = []
-    new_scores = {s: {} for s in SCORE_TYPES}
     stats = {
         "written": 0, "skip_dover": 0, "skip_scene": 0,
-        "skip_short": 0, "errors": 0,
+        "skip_short": 0, "errors": 0, "resumed": len(done_videos),
     }
 
     try:
@@ -250,98 +231,143 @@ def process_one_zip(args):
             logger.info(f"[{base}] {len(video_names)} videos")
 
             with tempfile.TemporaryDirectory(dir=config.get("tmp_dir")) as tmpdir:
-                zout = zipfile.ZipFile(stg_zip_path, "w", zipfile.ZIP_STORED)
-                try:
-                    for vi, vname in enumerate(video_names):
-                        clip_id = Path(vname).stem
+                for vi, vname in enumerate(video_names):
+                    clip_id = Path(vname).stem
 
-                        if (vi + 1) % 100 == 0:
-                            logger.info(
-                                f"[{base}] {vi+1}/{len(video_names)} videos, "
-                                f"{stats['written']} clips so far"
-                            )
+                    if (vi + 1) % 20 == 0:
+                        logger.info(
+                            f"[{base}] {vi+1}/{len(video_names)} videos, "
+                            f"{stats['written']} clips"
+                        )
 
-                        # -- Dover filter --
-                        clip_dover = dover_data.get(clip_id)
-                        if clip_dover is None or clip_dover.get("dover_score", 0) < dover_thresh:
-                            stats["skip_dover"] += 1
-                            continue
+                    # -- Already checkpointed --
+                    if clip_id in done_videos:
+                        continue
 
-                        # -- Scene cuts --
-                        clip_sc = sc_data.get(clip_id)
-                        if clip_sc is None or not clip_sc.get("scenes"):
-                            stats["skip_scene"] += 1
-                            continue
-                        scenes = clip_sc["scenes"]
+                    # -- Dover filter --
+                    clip_dover = dover_data.get(clip_id)
+                    if clip_dover is None or clip_dover.get("dover_score", 0) < dover_thresh:
+                        stats["skip_dover"] += 1
+                        _checkpoint_video(checkpoint_path, clip_id)
+                        done_videos.add(clip_id)
+                        continue
 
-                        # -- In-zip metadata --
-                        json_name = f"{clip_id}.json"
-                        if json_name not in all_names:
-                            logger.warning(f"[{base}] No metadata JSON for {clip_id}")
-                            continue
-                        with zin.open(json_name) as jf:
-                            orig_meta = json.load(jf)
+                    # -- Scene cuts --
+                    clip_sc = sc_data.get(clip_id)
+                    if clip_sc is None or not clip_sc.get("scenes"):
+                        stats["skip_scene"] += 1
+                        _checkpoint_video(checkpoint_path, clip_id)
+                        done_videos.add(clip_id)
+                        continue
+                    scenes = clip_sc["scenes"]
 
-                        source_fps = orig_meta.get("fps", target_fps)
+                    # -- In-zip metadata --
+                    json_name = f"{clip_id}.json"
+                    if json_name not in all_names:
+                        logger.warning(f"[{base}] No metadata JSON for {clip_id}")
+                        _checkpoint_video(checkpoint_path, clip_id)
+                        done_videos.add(clip_id)
+                        continue
+                    with zin.open(json_name) as jf:
+                        orig_meta = json.load(jf)
 
-                        # -- Extract video to disk --
-                        vtmp = os.path.join(tmpdir, f"_src_{clip_id}.mp4")
-                        with zin.open(vname) as src, open(vtmp, "wb") as dst:
-                            shutil.copyfileobj(src, dst)
+                    source_fps = orig_meta.get("fps", target_fps)
 
-                        try:
-                            _process_clip_scenes(
-                                clip_id, vtmp, orig_meta, scenes,
-                                source_fps, target_fps, min_frames,
-                                max_frames, stride, tmpdir, zout,
-                                manifest, new_scores, stats,
-                                dover_data, color_data, uni_data, vmaf_data,
-                                base,
-                            )
-                        except Exception as e:
-                            logger.error(f"[{base}] Error on {clip_id}: {e}")
-                            stats["errors"] += 1
-                        finally:
-                            if os.path.exists(vtmp):
-                                os.remove(vtmp)
+                    # -- Extract video to local temp --
+                    vtmp = os.path.join(tmpdir, f"_src_{clip_id}.mp4")
+                    with zin.open(vname) as src, open(vtmp, "wb") as dst:
+                        shutil.copyfileobj(src, dst)
 
-                finally:
-                    zout.close()
+                    try:
+                        _process_clip_scenes(
+                            clip_id, vtmp, orig_meta, scenes,
+                            source_fps, target_fps, min_frames,
+                            max_frames, stride, tmpdir, stg_dir,
+                            stats, dover_data, color_data, uni_data,
+                            vmaf_data, base,
+                        )
+                    except Exception as e:
+                        logger.error(f"[{base}] Error on {clip_id}: {e}")
+                        stats["errors"] += 1
+                    finally:
+                        if os.path.exists(vtmp):
+                            os.remove(vtmp)
+
+                    # Checkpoint: this video is done
+                    _checkpoint_video(checkpoint_path, clip_id)
+                    done_videos.add(clip_id)
 
     except Exception:
         logger.error(f"[{base}] Fatal error:\n{traceback.format_exc()}")
-        if os.path.exists(stg_zip_path):
-            os.remove(stg_zip_path)
         return None
 
+    # ---- Build manifest and scores from staging dir ----
+    manifest = sorted(
+        Path(f).stem for f in os.listdir(stg_dir)
+        if f.endswith(".mp4")
+    )
     if not manifest:
         logger.info(f"[{base}] No output clips")
-        if os.path.exists(stg_zip_path):
-            os.remove(stg_zip_path)
         return None
 
-    # Persist manifest + scores to staging dir (avoids large IPC payloads)
+    new_scores = _build_scores(manifest, dover_data, color_data, uni_data,
+                               vmaf_data, target_fps, stg_dir)
+
     with open(manifest_path, "w") as f:
         json.dump(manifest, f)
     for st in SCORE_TYPES:
-        with open(os.path.join(staging_dir, f"{base}_scores_{st}.json"), "w") as f:
+        with open(os.path.join(stg_dir, f"_scores_{st}.json"), "w") as f:
             json.dump(new_scores[st], f)
 
     logger.info(
         f"[{base}] Done: written={stats['written']}  "
         f"skip_dover={stats['skip_dover']}  skip_short={stats['skip_short']}  "
-        f"skip_scene={stats['skip_scene']}  errors={stats['errors']}"
+        f"skip_scene={stats['skip_scene']}  errors={stats['errors']}  "
+        f"resumed={stats['resumed']}  total_clips={len(manifest)}"
     )
     return base
+
+
+def _checkpoint_video(checkpoint_path, clip_id):
+    """Append one clip_id to the checkpoint file (fast, append-only)."""
+    with open(checkpoint_path, "a") as f:
+        f.write(clip_id + "\n")
+
+
+def _build_scores(manifest, dover_data, color_data, uni_data, vmaf_data,
+                  target_fps, stg_dir):
+    """Rebuild score dicts from sidecar JSONs for all clips in manifest."""
+    scores = {s: {} for s in SCORE_TYPES}
+    for new_id in manifest:
+        orig_id = _original_clip_id(new_id)
+
+        if orig_id in dover_data:
+            scores["dover"][new_id] = dover_data[orig_id]
+        if orig_id in color_data:
+            scores["color"][new_id] = color_data[orig_id]
+        if orig_id in uni_data:
+            scores["unimatch"][new_id] = uni_data[orig_id]
+        if orig_id in vmaf_data:
+            scores["vmafmotion"][new_id] = vmaf_data[orig_id]
+
+        meta_path = os.path.join(stg_dir, f"{new_id}.json")
+        meta = load_json(meta_path)
+        duration = meta["seconds"] if meta else 0
+        scores["scene_cut"][new_id] = {
+            "num_scenes": 1,
+            "scenes": [{"start": 0.0, "end": duration}],
+            "threshold": 0.5,
+        }
+    return scores
 
 
 def _process_clip_scenes(
     clip_id, vtmp, orig_meta, scenes,
     source_fps, target_fps, min_frames, max_frames, stride,
-    tmpdir, zout, manifest, new_scores, stats,
+    tmpdir, stg_dir, stats,
     dover_data, color_data, uni_data, vmaf_data, base,
 ):
-    """Split one clip's scenes into output sub-clips (single or sliding-window)."""
+    """Split one clip's scenes into output sub-clips, writing to staging dir."""
     for si, scene in enumerate(scenes):
         start_sec = scene["start"]
         end_sec = scene["end"]
@@ -355,7 +381,6 @@ def _process_clip_scenes(
             stats["skip_short"] += 1
             continue
 
-        # Build list of (new_id, seek_sec, n_frames) to cut
         cuts = []
         if scene_frames <= max_frames:
             target_n = snap_to_16n_plus_1(scene_frames)
@@ -398,25 +423,12 @@ def _process_clip_scenes(
                 continue
 
             new_meta = build_clip_metadata(orig_meta, actual_frames, target_fps)
-            zout.write(out_path, f"{new_id}.mp4")
-            zout.writestr(f"{new_id}.json", json.dumps(new_meta, indent=2))
-            os.remove(out_path)
 
-            # Accumulate scores
-            manifest.append(new_id)
-            if clip_id in dover_data:
-                new_scores["dover"][new_id] = dover_data[clip_id]
-            if clip_id in color_data:
-                new_scores["color"][new_id] = color_data[clip_id]
-            if clip_id in uni_data:
-                new_scores["unimatch"][new_id] = uni_data[clip_id]
-            if clip_id in vmaf_data:
-                new_scores["vmafmotion"][new_id] = vmaf_data[clip_id]
-            new_scores["scene_cut"][new_id] = {
-                "num_scenes": 1,
-                "scenes": [{"start": 0.0, "end": actual_frames / target_fps}],
-                "threshold": 0.5,
-            }
+            # Write clip files to staging dir (individual files, not zip)
+            shutil.move(out_path, os.path.join(stg_dir, f"{new_id}.mp4"))
+            with open(os.path.join(stg_dir, f"{new_id}.json"), "w") as f:
+                json.dump(new_meta, f, indent=2)
+
             stats["written"] += 1
 
 
@@ -425,42 +437,42 @@ def _process_clip_scenes(
 # ---------------------------------------------------------------------------
 
 def package_outputs(staging_dir, output_dir, max_clips):
-    """Merge staging zips into final output zips, capped at *max_clips* each."""
+    """Read from staging dirs, package into final output zips."""
     os.makedirs(output_dir, exist_ok=True)
 
-    manifest_files = sorted(glob.glob(os.path.join(staging_dir, "*_manifest.json")))
-    if not manifest_files:
-        logger.info("No staging outputs to package")
+    # Find completed staging dirs (those with _manifest.json)
+    completed = []
+    for name in sorted(os.listdir(staging_dir)):
+        dpath = os.path.join(staging_dir, name)
+        if os.path.isdir(dpath) and os.path.isfile(os.path.join(dpath, "_manifest.json")):
+            completed.append(dpath)
+
+    if not completed:
+        logger.info("No completed staging dirs to package")
         return
 
-    # Collect all clip references and scores
-    all_clips = []  # (staging_zip_path, clip_id)
+    all_clips = []  # (stg_dir_path, clip_id)
     all_scores = {s: {} for s in SCORE_TYPES}
 
-    for mf in manifest_files:
-        base = Path(mf).stem.replace("_manifest", "")
-        sz = os.path.join(staging_dir, f"{base}.zip")
-        if not os.path.isfile(sz):
-            logger.warning(f"Staging zip missing for {base}, skipping")
+    for dpath in completed:
+        manifest = load_json(os.path.join(dpath, "_manifest.json"))
+        if not manifest:
             continue
-        with open(mf) as f:
-            clip_ids = json.load(f)
-        all_clips.extend((sz, cid) for cid in clip_ids)
+        all_clips.extend((dpath, cid) for cid in manifest)
         for st in SCORE_TYPES:
-            sp = os.path.join(staging_dir, f"{base}_scores_{st}.json")
-            sd = load_json(sp)
+            sd = load_json(os.path.join(dpath, f"_scores_{st}.json"))
             if sd:
                 all_scores[st].update(sd)
 
-    # Deduplicate (unlikely but be safe)
+    # Deduplicate
     seen = set()
     deduped = []
-    for sz, cid in all_clips:
-        if cid in seen:
+    for dp, cid in all_clips:
+        if cid not in seen:
+            seen.add(cid)
+            deduped.append((dp, cid))
+        else:
             logger.warning(f"Duplicate clip_id '{cid}' – skipping")
-            continue
-        seen.add(cid)
-        deduped.append((sz, cid))
     all_clips = deduped
 
     total = len(all_clips)
@@ -470,7 +482,6 @@ def package_outputs(staging_dir, output_dir, max_clips):
     clip_count = 0
     cur_zip = None
     cur_scores = {s: {} for s in SCORE_TYPES}
-    open_staging = {}  # cache open staging ZipFile handles
 
     def _close_zip():
         nonlocal zip_idx, clip_count, cur_zip, cur_scores
@@ -497,20 +508,16 @@ def package_outputs(staging_dir, output_dir, max_clips):
             cur_zip = zipfile.ZipFile(zpath, "w", zipfile.ZIP_STORED)
 
     try:
-        for i, (sz, cid) in enumerate(all_clips):
+        for i, (dp, cid) in enumerate(all_clips):
             if clip_count >= max_clips:
                 _close_zip()
 
             _ensure_zip()
 
-            if sz not in open_staging:
-                open_staging[sz] = zipfile.ZipFile(sz, "r")
-            szf = open_staging[sz]
-
             for ext in (".mp4", ".json"):
-                entry = f"{cid}{ext}"
-                if entry in szf.namelist():
-                    cur_zip.writestr(entry, szf.read(entry))
+                fpath = os.path.join(dp, f"{cid}{ext}")
+                if os.path.isfile(fpath):
+                    cur_zip.write(fpath, f"{cid}{ext}")
 
             for st in SCORE_TYPES:
                 if cid in all_scores[st]:
@@ -523,9 +530,10 @@ def package_outputs(staging_dir, output_dir, max_clips):
 
         _close_zip()
 
-    finally:
-        for szf in open_staging.values():
-            szf.close()
+    except Exception:
+        logger.error(f"Phase 2 error:\n{traceback.format_exc()}")
+        if cur_zip is not None:
+            cur_zip.close()
 
     logger.info(f"Packaging complete: {zip_idx} output zip(s)")
 
@@ -546,7 +554,6 @@ def main():
         format="%(asctime)s [%(levelname)s] %(processName)s  %(message)s",
     )
 
-    # Dependency check
     for cmd in ("ffmpeg", "ffprobe"):
         try:
             subprocess.run([cmd, "-version"], capture_output=True, timeout=10)
@@ -554,7 +561,6 @@ def main():
             logger.error(f"'{cmd}' not found – please install ffmpeg")
             sys.exit(1)
 
-    # Discover input zips
     all_zips = sorted(
         f for f in os.listdir(input_dir)
         if f.endswith(".zip") and not f.startswith(".")
@@ -563,7 +569,6 @@ def main():
         logger.error(f"No zip files found in {input_dir}")
         sys.exit(1)
 
-    # Filter to zip-list if provided (for distributed Phase 1)
     if args.zip_list:
         with open(args.zip_list) as f:
             wanted = {line.strip() for line in f if line.strip()}
@@ -597,7 +602,6 @@ def main():
     run_phase1 = args.phase in ("1", "all")
     run_phase2 = args.phase in ("2", "all")
 
-    # ---- Phase 1 ----
     if run_phase1:
         tasks = [(zp, input_dir, staging_dir, config) for zp in zip_files]
         logger.info("=" * 60)
@@ -617,7 +621,6 @@ def main():
         ok_count = sum(1 for r in results if r is not None)
         logger.info(f"Phase 1 complete: {ok_count}/{len(tasks)} zips produced clips")
 
-    # ---- Phase 2 ----
     if run_phase2:
         logger.info("=" * 60)
         logger.info("PHASE 2: Packaging output zips")

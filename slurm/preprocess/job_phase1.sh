@@ -1,11 +1,10 @@
 #!/bin/bash
 #
-# Phase 1 worker: process a subset of input zips into staging.
+# Phase 1 worker: process a subset of input zips into staging directories.
 # Called by submit_all.sh with: job_phase1.sh <zip_list_file> <num_workers>
 #
-# Self-resubmit: if not all zips finish within the time limit, USR1 is
-# caught 120s before timeout; we stop Python and resubmit the same job.
-# On the next run, --resume skips finished zips.
+# Per-video checkpointing: interrupted jobs lose at most one video's work.
+# Self-resubmit: USR1 signal 120s before timeout stops Python and resubmits.
 #
 
 ZIP_LIST="$1"
@@ -24,7 +23,6 @@ OUTPUT_DIR="$PROJECT_DIR/miradata_processed"
 LOG_DIR="$PROJECT_DIR/slurm/preprocess/logs"
 STAGING_DIR="$OUTPUT_DIR/.staging"
 
-# Use local SSD for temp files instead of Lustre
 LOCAL_TMP="/tmp/miradata_prep_${SLURM_JOB_ID:-$$}"
 mkdir -p "$LOCAL_TMP"
 
@@ -38,12 +36,11 @@ cleanup_and_resubmit() {
     fi
     rm -rf "$LOCAL_TMP"
 
-    # Check if all assigned zips are done
     all_done=true
     while IFS= read -r zipname || [ -n "$zipname" ]; do
         [ -z "$zipname" ] && continue
         base="${zipname%.zip}"
-        if [ ! -f "$STAGING_DIR/${base}_manifest.json" ]; then
+        if [ ! -f "$STAGING_DIR/${base}/_manifest.json" ]; then
             all_done=false
             break
         fi
@@ -52,18 +49,8 @@ cleanup_and_resubmit() {
     if [ "$all_done" = true ]; then
         echo "$(date): All zips in this group are done, no resubmit needed"
     else
-        # Clean incomplete staging zips before resubmit
-        while IFS= read -r zipname || [ -n "$zipname" ]; do
-            [ -z "$zipname" ] && continue
-            base="${zipname%.zip}"
-            if [ ! -f "$STAGING_DIR/${base}_manifest.json" ] && [ -f "$STAGING_DIR/${base}.zip" ]; then
-                rm -f "$STAGING_DIR/${base}.zip"
-                echo "  Cleaned incomplete: ${base}.zip"
-            fi
-        done < "$ZIP_LIST"
-
         gid="${SLURM_JOB_NAME##*-}"
-        echo "$(date): Resubmitting group $gid..."
+        echo "$(date): Work incomplete, resubmitting group $gid (checkpoints preserved)..."
         sbatch \
             --account=nvr_elm_llm \
             --partition=cpu_short \
