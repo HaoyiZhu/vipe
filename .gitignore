@@ -202,3 +202,9 @@ slurm/omniworld/chunk_list.json
 slurm/omniworld_test/
 OmniWorld-Game-vipe
 miradata
+miradata_processed
+output
+*logs/
+*.out
+*.err
+*.txt
