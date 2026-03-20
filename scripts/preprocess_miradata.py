@@ -57,6 +57,21 @@ def parse_args():
                    help="File listing zip basenames to process (one per line)")
     p.add_argument("--tmp-dir", type=str, default=None,
                    help="Local temp dir for ffmpeg I/O (e.g. /tmp)")
+    # Phase 2 quality filters
+    p.add_argument("--p2-dover-min", type=float, default=0.35,
+                   help="Phase 2: min dover_score")
+    p.add_argument("--p2-saturation-min", type=float, default=0.0,
+                   help="Phase 2: min mean_video_saturation")
+    p.add_argument("--p2-saturation-max", type=float, default=180.0,
+                   help="Phase 2: max mean_video_saturation")
+    p.add_argument("--p2-vmafmotion-min", type=float, default=0.5,
+                   help="Phase 2: min vmafmotion_score")
+    p.add_argument("--p2-vmafmotion-max", type=float, default=50.0,
+                   help="Phase 2: max vmafmotion_score")
+    p.add_argument("--p2-unimatch-min", type=float, default=3.0,
+                   help="Phase 2: min avg unimatch_flow_score")
+    p.add_argument("--p2-unimatch-max", type=float, default=50.0,
+                   help="Phase 2: max avg unimatch_flow_score")
     return p.parse_args()
 
 
@@ -206,7 +221,12 @@ def process_one_zip(args):
     sc_data = load_json(os.path.join(input_dir, f"{base}_scene_cut.json"))
     if sc_data is None:
         logger.warning(f"[{base}] No scene_cut.json – skipping entire zip")
-        return None
+        with open(manifest_path, "w") as f:
+            json.dump([], f)
+        for st in SCORE_TYPES:
+            with open(os.path.join(stg_dir, f"_scores_{st}.json"), "w") as f:
+                json.dump({}, f)
+        return base
 
     dover_data = load_json(os.path.join(input_dir, f"{base}_dover.json")) or {}
     color_data = load_json(os.path.join(input_dir, f"{base}_color.json")) or {}
@@ -308,7 +328,12 @@ def process_one_zip(args):
     )
     if not manifest:
         logger.info(f"[{base}] No output clips")
-        return None
+        with open(manifest_path, "w") as f:
+            json.dump([], f)
+        for st in SCORE_TYPES:
+            with open(os.path.join(stg_dir, f"_scores_{st}.json"), "w") as f:
+                json.dump({}, f)
+        return base
 
     new_scores = _build_scores(manifest, dover_data, color_data, uni_data,
                                vmaf_data, target_fps, stg_dir)
@@ -436,8 +461,41 @@ def _process_clip_scenes(
 # Phase 2 – sequential packaging
 # ---------------------------------------------------------------------------
 
-def package_outputs(staging_dir, output_dir, max_clips):
-    """Read from staging dirs, package into final output zips."""
+def _passes_quality_filter(cid, all_scores, filters):
+    """Return True if clip passes all Phase 2 quality gates."""
+    # Dover
+    dover = all_scores["dover"].get(cid)
+    if not dover or dover.get("dover_score", 0) < filters["dover_min"]:
+        return False
+
+    # Color saturation
+    color = all_scores["color"].get(cid)
+    if color:
+        sat = color.get("mean_video_saturation", -1)
+        if sat < filters["saturation_min"] or sat > filters["saturation_max"]:
+            return False
+
+    # VMAF motion
+    vmaf = all_scores["vmafmotion"].get(cid)
+    if vmaf:
+        ms = vmaf.get("vmafmotion_score", -1)
+        if ms < filters["vmafmotion_min"] or ms > filters["vmafmotion_max"]:
+            return False
+
+    # Unimatch (average of per-frame list)
+    uni = all_scores["unimatch"].get(cid)
+    if uni:
+        flow = uni.get("unimatch_flow_score")
+        if isinstance(flow, list) and flow:
+            avg_flow = sum(flow) / len(flow)
+            if avg_flow < filters["unimatch_min"] or avg_flow > filters["unimatch_max"]:
+                return False
+
+    return True
+
+
+def package_outputs(staging_dir, output_dir, max_clips, quality_filters=None):
+    """Read from staging dirs, quality-filter, package into final output zips."""
     os.makedirs(output_dir, exist_ok=True)
 
     # Find completed staging dirs (those with _manifest.json)
@@ -474,6 +532,25 @@ def package_outputs(staging_dir, output_dir, max_clips):
         else:
             logger.warning(f"Duplicate clip_id '{cid}' – skipping")
     all_clips = deduped
+
+    total_before = len(all_clips)
+
+    # Quality filter
+    if quality_filters:
+        logger.info(
+            f"Phase 2 quality filters: dover>={quality_filters['dover_min']}  "
+            f"saturation=[{quality_filters['saturation_min']},{quality_filters['saturation_max']}]  "
+            f"vmafmotion=[{quality_filters['vmafmotion_min']},{quality_filters['vmafmotion_max']}]  "
+            f"unimatch_avg=[{quality_filters['unimatch_min']},{quality_filters['unimatch_max']}]"
+        )
+        filtered = [(dp, cid) for dp, cid in all_clips
+                     if _passes_quality_filter(cid, all_scores, quality_filters)]
+        n_dropped = total_before - len(filtered)
+        logger.info(
+            f"Quality filter: {total_before} -> {len(filtered)} clips "
+            f"({n_dropped} dropped, {n_dropped*100/max(total_before,1):.1f}%)"
+        )
+        all_clips = filtered
 
     total = len(all_clips)
     logger.info(f"Phase 2: packaging {total} clips (max {max_clips}/zip)")
@@ -626,7 +703,17 @@ def main():
         logger.info("PHASE 2: Packaging output zips")
         logger.info("=" * 60)
 
-        package_outputs(staging_dir, output_dir, args.max_clips_per_zip)
+        quality_filters = {
+            "dover_min": args.p2_dover_min,
+            "saturation_min": args.p2_saturation_min,
+            "saturation_max": args.p2_saturation_max,
+            "vmafmotion_min": args.p2_vmafmotion_min,
+            "vmafmotion_max": args.p2_vmafmotion_max,
+            "unimatch_min": args.p2_unimatch_min,
+            "unimatch_max": args.p2_unimatch_max,
+        }
+        package_outputs(staging_dir, output_dir, args.max_clips_per_zip,
+                        quality_filters=quality_filters)
 
         logger.info("Cleaning up staging area...")
         shutil.rmtree(staging_dir, ignore_errors=True)

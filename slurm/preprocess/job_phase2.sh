@@ -25,6 +25,10 @@ echo "Staging manifests found: $n_manifests"
 python "$PROJECT_DIR/scripts/preprocess_miradata.py" \
     --input-dir "$INPUT_DIR" \
     --output-dir "$OUTPUT_DIR" \
-    --phase 2
+    --phase 2 \
+    --p2-dover-min 0.35 \
+    --p2-saturation-min 0.0 --p2-saturation-max 180.0 \
+    --p2-vmafmotion-min 0.5 --p2-vmafmotion-max 50.0 \
+    --p2-unimatch-min 3.0 --p2-unimatch-max 50.0
 
 echo "=== Phase 2 packaging done ==="
