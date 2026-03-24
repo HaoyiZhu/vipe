@@ -19,7 +19,7 @@ echo "=== Phase 2 packaging starting ==="
 echo "Host: $(hostname)"
 
 # Check how many staging manifests exist
-n_manifests=$(ls "$OUTPUT_DIR/.staging/"*_manifest.json 2>/dev/null | wc -l)
+n_manifests=$(find "$OUTPUT_DIR/.staging" -name "_manifest.json" 2>/dev/null | wc -l)
 echo "Staging manifests found: $n_manifests"
 
 python "$PROJECT_DIR/scripts/preprocess_miradata.py" \

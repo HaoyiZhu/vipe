@@ -210,6 +210,16 @@ class DefaultAnnotationPipeline(Pipeline):
             annotate_output.payload = slam_output
             return annotate_output
 
+        if self.out_cfg.get("save_pose_only", False):
+            for view_idx, artifact_path in enumerate(artifact_paths):
+                artifact_path.meta_info_path.parent.mkdir(exist_ok=True, parents=True)
+                logger.info(f"Saving pose-only artifacts to {artifact_path}")
+                io.save_slam_intermediate_artifacts(artifact_path, slam_output, view_idx=view_idx)
+                with artifact_path.meta_info_path.open("wb") as f:
+                    slam_output.metrics["ba_residual"] = slam_output.ba_residual
+                    pickle.dump(slam_output.metrics, f)
+            return annotate_output
+
         output_streams = [
             self._add_post_processors(view_idx, slam_stream, slam_output).cache("depth", online=True)
             for view_idx, slam_stream in enumerate(slam_streams)

@@ -1,0 +1,43 @@
+defaults:
+  - /slam: default
+
+instance: vipe.pipeline.default.DefaultAnnotationPipeline
+
+# Init configs (GeoCalib + TrackAnything kept for dynamic object masking in SLAM)
+init:
+  camera_type: "pinhole"
+  intrinsics: "geocalib"
+  instance:
+    kf_gap_sec: 2.0
+    phrases: 
+      - person
+      - animal
+      - vehicle
+      - ball
+      - balloon
+      - gun
+      - pet
+      - car
+      - bus
+    add_sky: true
+
+slam:
+  keyframe_thresh: 1.0
+  keyframe_depth: pi3x_moge
+  optimize_intrinsics: ${neq:${..init.intrinsics},"gt"}
+  per_frame_intrinsics: true
+
+# No post-processing (depth alignment skipped entirely)
+post:
+  depth_align_model: null
+  pixel_limit: 255000
+
+# Output: pose + intrinsics only
+output:
+  path: vipe_results/
+  skip_exists: true
+  save_pose_only: true
+  save_artifacts: false
+  save_slam_map: false
+  save_viz: false
+  save_slam_intermediate: false

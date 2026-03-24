@@ -426,6 +426,11 @@ def _process_clip_scenes(
                 ))
 
         for new_id, seek_sec, n_frames in cuts:
+            stg_mp4 = os.path.join(stg_dir, f"{new_id}.mp4")
+            if os.path.isfile(stg_mp4) and os.path.getsize(stg_mp4) > 0:
+                stats["written"] += 1
+                continue
+
             out_path = os.path.join(tmpdir, f"{new_id}.mp4")
             try:
                 actual_frames = ffmpeg_cut(
@@ -490,6 +495,11 @@ def _passes_quality_filter(cid, all_scores, filters):
             avg_flow = sum(flow) / len(flow)
             if avg_flow < filters["unimatch_min"] or avg_flow > filters["unimatch_max"]:
                 return False
+
+    # Scene cut: reject multi-scene clips
+    sc = all_scores["scene_cut"].get(cid)
+    if sc and sc.get("num_scenes", 1) > 1:
+        return False
 
     return True
 
