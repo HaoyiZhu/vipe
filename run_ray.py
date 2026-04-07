@@ -250,9 +250,12 @@ def run(args: DictConfig) -> None:
             logger.info(
                 f"Processing {video_stream.name()} ({stream_idx + 1} / {len(stream_list)})"
             )
-            pipeline = make_pipeline(args.pipeline)
-            pipeline.run(video_stream)
-            logger.info(f"Finished processing {video_stream.name()}")
+            try:
+                pipeline = make_pipeline(args.pipeline)
+                pipeline.run(video_stream)
+                logger.info(f"Finished processing {video_stream.name()}")
+            except Exception:
+                logger.exception(f"Failed processing {video_stream.name()}, skipping")
 
 
 if __name__ == "__main__":
