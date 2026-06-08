@@ -78,6 +78,39 @@ class PostConfig(BaseConfigSchema):
         description="Depth model or alignment recipe used after SLAM. Examples include adaptive_unidepth-l, "
         "adaptive_unidepth-l_svda, adaptive_moge_vda, mvd_dav3, dap, and unik3d. Set to null for pose-only output."
     )
+    pixel_limit: int = Field(default=255000, ge=1, description="Maximum image pixels processed by Pi3X/MoGe2.")
+    window_size: int = Field(default=64, ge=1, description="Sliding-window size for Pi3X/MoGe2 post depth.")
+    overlap_size: int = Field(default=16, ge=0, description="Sliding-window overlap for Pi3X/MoGe2 post depth.")
+    align_lr_size: int = Field(default=64, ge=1, description="Low-resolution alignment grid size.")
+    min_align_points: int = Field(default=200, ge=1, description="Minimum valid alignment samples per frame/window.")
+    align_mode: Literal["per_frame", "per_frame_ema", "window_shared", "window_shared_ema"] = Field(
+        default="window_shared_ema",
+        description="Scale-alignment mode for Pi3X/MoGe2 post depth.",
+    )
+    align_momentum: float = Field(default=0.99, ge=0.0, le=1.0, description="EMA momentum for post-depth scale.")
+    scale_clamp: tuple[float, float] = Field(
+        default=(0.1, 10.0),
+        description="Allowed scale range for Pi3X/MoGe2 depth alignment.",
+    )
+    shift_z_clamp: tuple[float, float] = Field(
+        default=(-1000.0, 1000.0),
+        description="Allowed z-shift range used while robustly estimating alignment scale.",
+    )
+    align_source: Literal["moge2", "slam_map"] = Field(
+        default="slam_map",
+        description="Target geometry used to align Pi3X post depth.",
+    )
+    moge_bs: int = Field(default=4, ge=1, description="MoGe2 batch size used by Pi3X/MoGe2 post depth.")
+    max_window_align_points: int = Field(
+        default=2000,
+        ge=0,
+        description="Maximum samples used for window-shared Pi3X/MoGe2 alignment; zero disables the cap.",
+    )
+    max_frame_align_points: int = Field(
+        default=2000,
+        ge=0,
+        description="Maximum samples used for per-frame Pi3X/MoGe2 alignment; zero disables the cap.",
+    )
 
 
 class OutputConfig(BaseConfigSchema):
@@ -93,6 +126,10 @@ class OutputConfig(BaseConfigSchema):
     save_slam_map: bool = Field(
         default=False,
         description="Save the sparse SLAM reconstruction map for lightweight COLMAP conversion.",
+    )
+    save_slam_intermediate: bool = Field(
+        default=False,
+        description="Save raw SLAM trajectory and intrinsics before post-processing.",
     )
     save_viz: bool = Field(description="Render MP4 visualization videos for the configured visualization attributes.")
     viz_downsample: int = Field(ge=1, description="Downsample factor applied when rendering visualization videos.")

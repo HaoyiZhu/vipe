@@ -25,6 +25,7 @@ These are the pipeline values accepted by `pipeline=...` in Hydra overrides and 
 | `static_vda` | Default pipeline without instance segmentation, using static VDA alignment. | `DefaultAnnotationPipeline` | `pinhole` | `unidepth-l` | `adaptive_unidepth-l_vda` |
 | `wide_angle` | Default pipeline configured for wide-angle or fisheye input. | `DefaultAnnotationPipeline` | `mei` | `unidepth-l` | `null` |
 | `panorama` | Panorama pipeline that projects 360-degree frames into virtual perspective views. | `PanoramaAnnotationPipeline` | `panorama` | `null` | `null` |
+| `default_perframe_intr` |  | `DefaultAnnotationPipeline` | `pinhole` | `pi3x_moge` | `pi3x_moge_perframe` |
 
 ## Stream Presets
 
@@ -138,6 +139,19 @@ Depth post-processing options.
 | Field | Type | Default | Constraints | Description |
 | --- | --- | --- | --- | --- |
 | `depth_align_model` | str \| null | required | - | Depth model or alignment recipe used after SLAM. Examples include adaptive_unidepth-l, adaptive_unidepth-l_svda, adaptive_moge_vda, mvd_dav3, dap, and unik3d. Set to null for pose-only output. |
+| `pixel_limit` | int | `255000` | >= 1 | Maximum image pixels processed by Pi3X/MoGe2. |
+| `window_size` | int | `64` | >= 1 | Sliding-window size for Pi3X/MoGe2 post depth. |
+| `overlap_size` | int | `16` | >= 0 | Sliding-window overlap for Pi3X/MoGe2 post depth. |
+| `align_lr_size` | int | `64` | >= 1 | Low-resolution alignment grid size. |
+| `min_align_points` | int | `200` | >= 1 | Minimum valid alignment samples per frame/window. |
+| `align_mode` | `per_frame` \| `per_frame_ema` \| `window_shared` \| `window_shared_ema` | `window_shared_ema` | choices `per_frame` \| `per_frame_ema` \| `window_shared` \| `window_shared_ema` | Scale-alignment mode for Pi3X/MoGe2 post depth. |
+| `align_momentum` | float | `0.99` | >= 0.0, <= 1.0 | EMA momentum for post-depth scale. |
+| `scale_clamp` | tuple[float, float] | `[0.1, 10.0]` | min items 2, max items 2 | Allowed scale range for Pi3X/MoGe2 depth alignment. |
+| `shift_z_clamp` | tuple[float, float] | `[-1000.0, 1000.0]` | min items 2, max items 2 | Allowed z-shift range used while robustly estimating alignment scale. |
+| `align_source` | `moge2` \| `slam_map` | `slam_map` | choices `moge2` \| `slam_map` | Target geometry used to align Pi3X post depth. |
+| `moge_bs` | int | `4` | >= 1 | MoGe2 batch size used by Pi3X/MoGe2 post depth. |
+| `max_window_align_points` | int | `2000` | >= 0 | Maximum samples used for window-shared Pi3X/MoGe2 alignment; zero disables the cap. |
+| `max_frame_align_points` | int | `2000` | >= 0 | Maximum samples used for per-frame Pi3X/MoGe2 alignment; zero disables the cap. |
 
 ### OutputConfig
 
@@ -149,6 +163,7 @@ Output paths and artifact/visualization controls.
 | `skip_exists` | bool | required | - | Skip a sequence when the expected output already exists. |
 | `save_artifacts` | bool | required | - | Save reusable RGB, pose, intrinsics, depth, and mask artifacts for visualization or downstream use. |
 | `save_slam_map` | bool | `false` | - | Save the sparse SLAM reconstruction map for lightweight COLMAP conversion. |
+| `save_slam_intermediate` | bool | `false` | - | Save raw SLAM trajectory and intrinsics before post-processing. |
 | `save_viz` | bool | required | - | Render MP4 visualization videos for the configured visualization attributes. |
 | `viz_downsample` | int | required | >= 1 | Downsample factor applied when rendering visualization videos. |
 | `viz_attributes` | list[list[`rgb` \| `instance` \| `depth` \| `pcd` \| `rectified`]] | required | min items 1 | Groups of frame attributes to render into visualization videos. Each inner list becomes one panel. |
@@ -203,6 +218,7 @@ DROID-style SLAM frontend, backend, map extraction, and metric-depth options.
 | `backend_iters` | int | required | >= 1 | Number of backend optimization iterations. |
 | `init_disp` | float | required | > 0.0 | Initial inverse-depth value assigned to new keyframes. |
 | `optimize_intrinsics` | bool | required | - | Optimize camera intrinsics during bundle adjustment. |
+| `per_frame_intrinsics` | bool | `false` | - | Optimize and store independent intrinsics for each frame instead of one shared value per view. |
 | `optimize_rig_rotation` | bool | required | - | Optimize rig rotations for multi-view inputs. |
 | `cross_view` | bool | required | - | Add cross-view reprojection factors for multi-view or panorama-derived inputs. |
 | `cross_view_idx` | list[int] \| null | required | - | Optional cross-view index selection. Set to null to use the default neighboring-view selection. |
@@ -211,6 +227,7 @@ DROID-style SLAM frontend, backend, map extraction, and metric-depth options.
 | `infill_dense_disp` | bool | required | - | Also optimize dense disparity while filling non-keyframe outputs. |
 | `map_filter_thresh` | float | required | >= 0.0 | Depth-consistency threshold used when filtering SLAM-map points and extracting dense disparity. |
 | `visualize` | bool | required | - | Stream SLAM internals to rerun for debugging. |
+| `compute_ba_residual` | bool | `true` | - | Store the normalized final bundle-adjustment residual on the SLAM output. |
 | `keyframe_depth` | str \| null | required | - | Metric depth model used on keyframes to recover scale. Examples include metric3d-small, unidepth-l, moge, and dav3. Set to null to skip keyframe metric-depth recovery. |
 | `ba` | BAConfig | required | - | Bundle-adjustment solver options. |
 | `sparse_tracks` | SparseTracksConfig | required | - | Sparse-track backend options. |

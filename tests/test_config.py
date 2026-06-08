@@ -34,6 +34,7 @@ def _base_overrides(tmp_path: Path, pipeline: str = "default") -> list[str]:
     ("pipeline", "pipeline_type"),
     [
         ("default", DefaultPipelineConfig),
+        ("default_perframe_intr", DefaultPipelineConfig),
         ("dav3", DefaultPipelineConfig),
         ("lyra", DefaultPipelineConfig),
         ("no_vda", DefaultPipelineConfig),
@@ -161,6 +162,28 @@ def test_default_config_ships_auto_fused_ba(tmp_path: Path) -> None:
     config = parse_typed_config("default", _base_overrides(tmp_path))
 
     assert config.pipeline.slam.ba.fused is True
+
+
+def test_per_frame_intrinsics_config_disables_auto_fused_ba(tmp_path: Path) -> None:
+    config = parse_typed_config("default", _base_overrides(tmp_path, pipeline="default_perframe_intr"))
+
+    assert isinstance(config.pipeline, DefaultPipelineConfig)
+    assert config.pipeline.slam.per_frame_intrinsics is True
+    assert config.pipeline.slam.ba.fused is False
+    assert config.pipeline.post.depth_align_model == "pi3x_moge_perframe"
+    assert config.pipeline.output.save_slam_intermediate is True
+
+
+def test_per_frame_intrinsics_rejects_forced_fused_ba(tmp_path: Path) -> None:
+    with pytest.raises(ValidationError):
+        parse_typed_config(
+            "default",
+            [
+                *_base_overrides(tmp_path),
+                "pipeline.slam.per_frame_intrinsics=true",
+                "pipeline.slam.ba.fused=true",
+            ],
+        )
 
 
 def test_default_init_async_prefetch_can_fall_back_to_serialized_cache(tmp_path: Path) -> None:

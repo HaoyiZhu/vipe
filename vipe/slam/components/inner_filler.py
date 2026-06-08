@@ -35,6 +35,7 @@ from .factor_graph import FactorGraph
 class FilledReturn:
     poses: SE3  # Inverse of c2w
     dense_disps: torch.Tensor | None = None
+    intrinsics: torch.Tensor | None = None
 
     def scale(self, factor: float):
         self.poses.data[..., :3] *= factor
@@ -54,6 +55,7 @@ class InnerFiller:
 
         self.filled_poses: list[SE3] = []
         self.filled_dense_disps: list[torch.Tensor] = []
+        self.filled_intrinsics: list[torch.Tensor] = []
 
     def set_start_idx(self, start_idx: int):
         self.start_idx = start_idx
@@ -90,6 +92,13 @@ class InnerFiller:
                 self.video.disps[self.start_idx : total_frames],
             )
 
+        if self.video.per_frame_intrinsics:
+            n_intrinsics = self.video.intrinsics[: self.start_idx]
+            weights = ((m_tstamp - n_tstamp[t0]) / d_time).unsqueeze(-1).unsqueeze(-1)
+            self.video.intrinsics[self.start_idx : total_frames] = (1 - weights) * n_intrinsics[
+                t0
+            ] + weights * n_intrinsics[t1]
+
         # Build factor graph and optimize for the interpolated information.
         graph = FactorGraph(
             self.net,
@@ -112,6 +121,9 @@ class InnerFiller:
                 total_frames,
                 motion_only=not self.args.infill_dense_disp,
                 limited_disp=True,
+                optimize_intrinsics=bool(
+                    self.video.per_frame_intrinsics and self.args.get("per_frame_intrinsics", False)
+                ),
             )
 
         # (Optional) Metric computation of keyframe optimized disp and its original disp.
@@ -128,10 +140,14 @@ class InnerFiller:
             current_dense_disps = self.video.disps[self.start_idx : total_frames].clone()
             self.filled_dense_disps.append(current_dense_disps)
 
+        if self.video.per_frame_intrinsics:
+            self.filled_intrinsics.append(self.video.intrinsics[self.start_idx : total_frames].clone())
+
         self.video.n_frames = self.start_idx
 
     def get_result(self) -> FilledReturn:
         return FilledReturn(
             poses=lt.cat(self.filled_poses, dim=0),
             dense_disps=(torch.cat(self.filled_dense_disps, dim=0) if self.filled_dense_disps else None),
+            intrinsics=(torch.cat(self.filled_intrinsics, dim=0) if self.filled_intrinsics else None),
         )

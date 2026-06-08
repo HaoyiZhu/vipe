@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -186,7 +187,7 @@ class SLAMMap:
 @dataclass(kw_only=True)
 class SLAMOutput:
     trajectory: SE3  # (N,)
-    intrinsics: torch.Tensor  # (V, 4)
+    intrinsics: torch.Tensor  # (V, D) for shared intrinsics, (N, V, D) for per-frame intrinsics
 
     rig: SE3 | None = None  # (V,)
     slam_map: SLAMMap | None = None
@@ -194,6 +195,8 @@ class SLAMOutput:
     # Residual of BA (unit is pixel/diagonal) -- average num of pixels/diagonal between predicted and observed flows
     # Should be of range [0, 1]
     ba_residual: float = 0.0
+    per_frame_intrinsics: bool = False
+    metrics: dict[str, Any] = field(default_factory=dict)
 
     @property
     def keyframe_ids(self) -> np.ndarray:
@@ -203,3 +206,9 @@ class SLAMOutput:
     def get_view_trajectory(self, view_idx: int) -> SE3:
         assert self.rig is not None, "Rig not available."
         return self.trajectory * self.rig[view_idx][None]  # type: ignore
+
+    def get_intrinsics(self, frame_idx: int | None = None, view_idx: int = 0) -> torch.Tensor:
+        if self.per_frame_intrinsics:
+            assert frame_idx is not None, "frame_idx is required for per-frame intrinsics"
+            return self.intrinsics[frame_idx, view_idx]
+        return self.intrinsics[view_idx]

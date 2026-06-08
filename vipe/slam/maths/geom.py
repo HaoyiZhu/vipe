@@ -298,6 +298,76 @@ def iproj_i_proj_j_disp(
     return x1, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj)
 
 
+def iproj_i_proj_j_disp_preindexed_intrinsics(
+    poses: SE3,
+    disps: torch.Tensor,
+    disps_uv: torch.Tensor | None,
+    intrinsics_i: torch.Tensor,
+    intrinsics_j: torch.Tensor,
+    camera_type: CameraType,
+    rig: SE3,
+    pi: torch.Tensor,
+    pj: torch.Tensor,
+    qi: torch.Tensor,
+    qj: torch.Tensor,
+    di: torch.Tensor | None,
+    jacobian_p_d: bool,
+    jacobian_f: bool,
+    jacobian_r: bool,
+):
+    """Same projection term as ``iproj_i_proj_j_disp`` with per-edge intrinsics already selected."""
+    jacobian_p_d = jacobian_p_d or jacobian_f or jacobian_r
+
+    if di is not None:
+        disps = disps[di]
+        if disps_uv is not None:
+            disps_uv = disps_uv[di]
+
+    X0, Jz, Jfi = iproj_disp(
+        disps,
+        disps_uv,
+        intrinsics_i,
+        camera_type,
+        compute_jz=jacobian_p_d,
+        compute_jf=jacobian_f,
+    )
+
+    Gij = poses[pj] * poses[pi].inv()
+    T = rig[qj].inv() * Gij * rig[qi]  # type: ignore
+    assert T is not None
+    X1, Ja = actp(T, X0, compute_jp=jacobian_p_d)
+    x1, Jp, Jfj = proj_points(X1, intrinsics_j, camera_type, compute_jp=jacobian_p_d, compute_jf=jacobian_f)
+
+    valid = ((X1[..., 2] > BaseCameraModel.MIN_DEPTH) & (X0[..., 2] > BaseCameraModel.MIN_DEPTH)).float()
+    valid = valid.unsqueeze(-1)
+
+    n_dot_dim = len(X0.shape) - 2
+    dot_indexing = (slice(None),) + (None,) * n_dot_dim
+    expanded_indexing = (slice(None),) + (None,) * (n_dot_dim + 1)
+
+    if jacobian_p_d:
+        Ja = rig[qj].inv()[expanded_indexing].adjT(Ja)
+        Jj = torch.matmul(Jp, Ja)  # type: ignore
+        Ji = -Gij[expanded_indexing].adjT(Jj)  # type: ignore
+        Jz = T[dot_indexing] * Jz
+        Jz = torch.matmul(Jp, Jz.unsqueeze(-1))  # type: ignore
+    else:
+        Ji = Jj = None
+
+    if jacobian_f:
+        Jfi = T[expanded_indexing] * Jfi.transpose(-1, -2)
+        Jfi = torch.matmul(Jp, Jfi.transpose(-1, -2))  # type: ignore
+    else:
+        Jfi = Jfj = None
+
+    if jacobian_r:
+        Jri, Jrj = -Ji, -Jj  # type: ignore
+    else:
+        Jri = Jrj = None
+
+    return x1, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj)
+
+
 def frame_distance_dense_disp(
     poses: SE3,
     dense_disps: torch.Tensor,

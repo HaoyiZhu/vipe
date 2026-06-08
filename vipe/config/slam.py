@@ -83,6 +83,10 @@ class SLAMConfig(BaseConfigSchema):
     backend_iters: int = Field(ge=1, description="Number of backend optimization iterations.")
     init_disp: float = Field(gt=0.0, description="Initial inverse-depth value assigned to new keyframes.")
     optimize_intrinsics: bool = Field(description="Optimize camera intrinsics during bundle adjustment.")
+    per_frame_intrinsics: bool = Field(
+        default=False,
+        description="Optimize and store independent intrinsics for each frame instead of one shared value per view.",
+    )
     optimize_rig_rotation: bool = Field(description="Optimize rig rotations for multi-view inputs.")
     cross_view: bool = Field(
         description="Add cross-view reprojection factors for multi-view or panorama-derived inputs."
@@ -98,6 +102,10 @@ class SLAMConfig(BaseConfigSchema):
         description="Depth-consistency threshold used when filtering SLAM-map points and extracting dense disparity.",
     )
     visualize: bool = Field(description="Stream SLAM internals to rerun for debugging.")
+    compute_ba_residual: bool = Field(
+        default=True,
+        description="Store the normalized final bundle-adjustment residual on the SLAM output.",
+    )
     keyframe_depth: str | None = Field(
         description="Metric depth model used on keyframes to recover scale. Examples include metric3d-small, "
         "unidepth-l, moge, and dav3. Set to null to skip keyframe metric-depth recovery."
@@ -133,10 +141,13 @@ class SLAMConfig(BaseConfigSchema):
         """
         fused = self.ba.fused
         if isinstance(fused, bool):
+            if fused and self.per_frame_intrinsics:
+                raise ValueError("ba.fused=true is incompatible with per_frame_intrinsics=true")
             return fused
         return (
             single_view
             and pinhole
+            and not self.per_frame_intrinsics
             and self.ba.robust_kernel is None
             and not self.optimize_rig_rotation
             and self.sparse_tracks.name == "dummy"

@@ -39,6 +39,7 @@ from .processors import (
     AdaptiveDepthProcessor,
     GeoCalibIntrinsicsProcessor,
     MultiviewDepthProcessor,
+    Pi3XMoGePerFrameProcessor,
     TrackAnythingProcessor,
 )
 
@@ -83,16 +84,37 @@ class DefaultAnnotationPipeline(Pipeline):
     def _add_post_processors(
         self, view_idx: int, video_stream: VideoStream, slam_output: SLAMOutput
     ) -> ProcessedVideoStream:
+        intrinsics = [slam_output.get_intrinsics(frame_idx, view_idx) for frame_idx in range(len(video_stream))]
         post_processors: list[StreamProcessor] = [
             AssignAttributesProcessor(
                 {
                     FrameAttribute.POSE: slam_output.get_view_trajectory(view_idx),  # type: ignore
-                    FrameAttribute.INTRINSICS: [slam_output.intrinsics[view_idx]] * len(video_stream),
+                    FrameAttribute.INTRINSICS: intrinsics,
                 }
             )
         ]
         if (depth_align_model := self.post_cfg.depth_align_model) is not None:
-            if depth_align_model.startswith("mvd_"):
+            if depth_align_model == "pi3x_moge_perframe":
+                post_processors.append(
+                    Pi3XMoGePerFrameProcessor(
+                        slam_output,
+                        view_idx=view_idx,
+                        window_size=self.post_cfg.window_size,
+                        overlap_size=self.post_cfg.overlap_size,
+                        pixel_limit=self.post_cfg.pixel_limit,
+                        align_lr_size=self.post_cfg.align_lr_size,
+                        min_align_points=self.post_cfg.min_align_points,
+                        align_mode=self.post_cfg.align_mode,
+                        align_momentum=self.post_cfg.align_momentum,
+                        scale_clamp=tuple(self.post_cfg.scale_clamp),
+                        shift_z_clamp=tuple(self.post_cfg.shift_z_clamp),
+                        moge_bs=self.post_cfg.moge_bs,
+                        align_source=self.post_cfg.align_source,
+                        max_window_align_points=self.post_cfg.max_window_align_points,
+                        max_frame_align_points=self.post_cfg.max_frame_align_points,
+                    )
+                )
+            elif depth_align_model.startswith("mvd_"):
                 post_processors.append(MultiviewDepthProcessor(slam_output, model=depth_align_model))
             else:
                 post_processors.append(AdaptiveDepthProcessor(slam_output, view_idx, depth_align_model))
@@ -131,6 +153,10 @@ class DefaultAnnotationPipeline(Pipeline):
         slam_pipeline = SLAMSystem(device=torch.device("cuda"), config=self.slam_cfg, model_cache=self.model_cache)
         slam_output = slam_pipeline.run(slam_streams, rig=slam_rig, camera_type=self.camera_type)
 
+        if self.out_cfg.save_slam_intermediate:
+            for view_idx, artifact_path in enumerate(artifact_paths):
+                io.save_slam_intermediate_artifacts(artifact_path, slam_output, view_idx=view_idx)
+
         if self.return_payload:
             annotate_output.payload = slam_output
             return annotate_output
@@ -147,7 +173,9 @@ class DefaultAnnotationPipeline(Pipeline):
                 logger.info(f"Saving artifacts to {artifact_path}")
                 io.save_artifacts(artifact_path, output_stream)
                 with artifact_path.meta_info_path.open("wb") as f:
-                    pickle.dump({"ba_residual": slam_output.ba_residual}, f)
+                    metrics = dict(slam_output.metrics)
+                    metrics["ba_residual"] = slam_output.ba_residual
+                    pickle.dump(metrics, f)
 
             if self.out_cfg.save_viz:
                 save_projection_video(

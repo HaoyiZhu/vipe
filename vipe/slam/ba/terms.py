@@ -120,6 +120,8 @@ class DenseDepthFlowTerm(SolverTerm):
         rig: SE3 | None,
         image_size: tuple[int, int],
         camera_type: CameraType,
+        intrinsics_i_inds: torch.Tensor | None = None,
+        intrinsics_j_inds: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
 
@@ -137,6 +139,9 @@ class DenseDepthFlowTerm(SolverTerm):
         self.dense_disp_i_inds = dense_disp_i_inds
         self.image_size = image_size
         self.camera_type = camera_type
+        self.intrinsics_i_inds = intrinsics_i_inds if intrinsics_i_inds is not None else rig_i_inds
+        self.intrinsics_j_inds = intrinsics_j_inds if intrinsics_j_inds is not None else rig_j_inds
+        self.uses_custom_intrinsics_inds = intrinsics_i_inds is not None or intrinsics_j_inds is not None
 
         n_pixels = image_size[0] * image_size[1]
 
@@ -186,15 +191,21 @@ class DenseDepthFlowTerm(SolverTerm):
 
         assert isinstance(pose, SE3) and isinstance(dense_disp, torch.Tensor)
         assert dense_disp.shape[1] == self.image_size[0] * self.image_size[1]
-        assert intrinsics.shape[0] == rig.shape[0]
+        if not self.uses_custom_intrinsics_inds:
+            assert intrinsics.shape[0] == rig.shape[0]
 
         camera_model_cls = self.camera_type.camera_model_cls()
+        intrinsics_i = intrinsics[self.intrinsics_i_inds]
+        intrinsics_j = intrinsics[self.intrinsics_j_inds]
+        scaled_intrinsics_i = camera_model_cls(intrinsics_i).scaled(1.0 / self.intrinsics_factor).intrinsics
+        scaled_intrinsics_j = camera_model_cls(intrinsics_j).scaled(1.0 / self.intrinsics_factor).intrinsics
 
-        coords, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj) = geom.iproj_i_proj_j_disp(
+        coords, valid, (Ji, Jj, Jz), (Jfi, Jfj), (Jri, Jrj) = geom.iproj_i_proj_j_disp_preindexed_intrinsics(
             pose,
             dense_disp.view(-1, self.image_size[0], self.image_size[1]),
             None,
-            (camera_model_cls(intrinsics).scaled(1.0 / self.intrinsics_factor).intrinsics),
+            scaled_intrinsics_i,
+            scaled_intrinsics_j,
             self.camera_type,
             rig,
             self.pose_i_inds,
@@ -239,7 +250,7 @@ class DenseDepthFlowTerm(SolverTerm):
                 Jfj = rearrange(Jfj, "n h w c d -> n (h w c) d", c=2)
                 J_dict["intrinsics"] = SparseDenseBlockMatrix(
                     i_inds=torch.cat([term_inds, term_inds]),
-                    j_inds=torch.cat([self.rig_i_inds, self.rig_j_inds]),
+                    j_inds=torch.cat([self.intrinsics_i_inds, self.intrinsics_j_inds]),
                     data=camera_model_cls.J_scale(
                         1.0 / self.intrinsics_factor,
                         torch.cat([Jfi, Jfj], dim=0),

@@ -103,6 +103,7 @@ class SLAMSystem:
             sparse_tracks=self.sparse_tracks,
             camera_type=self.config.camera_type,
             device=self.device,
+            per_frame_intrinsics=self.config.get("per_frame_intrinsics", False),
         )
         self.buffer.rig[:] = self.rig.to(self.device).data
         self.motion_filter = MotionFilter(
@@ -161,7 +162,9 @@ class SLAMSystem:
             self.buffer.masks[kf_idx] = buffer_masks
 
         for view_idx, frame_data in enumerate(frame_data_list):
-            if kf_idx == 0:
+            if self.buffer.per_frame_intrinsics:
+                self.buffer.intrinsics[kf_idx, view_idx] = unpack_optional(frame_data.intrinsics)
+            elif kf_idx == 0:
                 self.buffer.intrinsics[view_idx] = unpack_optional(frame_data.intrinsics)
 
             if frame_data.metric_depth is not None:
@@ -320,13 +323,39 @@ class SLAMSystem:
         slam_map.backend_graph = self.backend.last_graph
 
         # Scale back the intrinsics to the original size.
-        original_intrinsics = torch.stack(
-            [resizer.recover_intrinsics(self.buffer.intrinsics[v]) for v, resizer in enumerate(resizers)]
-        )
+        if self.buffer.per_frame_intrinsics:
+            if filled_return.intrinsics is not None:
+                original_intrinsics = torch.stack(
+                    [
+                        torch.stack(
+                            [
+                                resizer.recover_intrinsics(filled_return.intrinsics[frame_idx, view_idx])
+                                for view_idx, resizer in enumerate(resizers)
+                            ]
+                        )
+                        for frame_idx in range(filled_return.intrinsics.shape[0])
+                    ]
+                )
+            else:
+                shared_intrinsics = torch.stack(
+                    [resizer.recover_intrinsics(self.buffer.intrinsics[0, v]) for v, resizer in enumerate(resizers)]
+                )
+                original_intrinsics = shared_intrinsics[None].expand(total_n_frames, -1, -1).clone()
+        else:
+            original_intrinsics = torch.stack(
+                [resizer.recover_intrinsics(self.buffer.intrinsics[v]) for v, resizer in enumerate(resizers)]
+            )
+
+        metrics = {}
+        if self.config.get("compute_ba_residual", True):
+            metrics["ba_residual"] = self.buffer.ba_residual
 
         return SLAMOutput(
             trajectory=filled_return.poses.inv(),
             intrinsics=original_intrinsics,
             rig=SE3(self.buffer.rig.clone()),
             slam_map=slam_map,
+            ba_residual=self.buffer.ba_residual,
+            per_frame_intrinsics=self.buffer.per_frame_intrinsics,
+            metrics=metrics,
         )

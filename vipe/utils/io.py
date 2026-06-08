@@ -97,6 +97,10 @@ class ArtifactPath:
         return self.base_path / "vipe" / f"{self.artifact_name}_slam_map.pt"
 
     @property
+    def slam_intermediate_path(self) -> Path:
+        return self.base_path / "vipe" / f"{self.artifact_name}_slam_intermediate.npz"
+
+    @property
     def essential_paths(self) -> list[Path]:
         return [
             self.rgb_path,
@@ -177,6 +181,30 @@ def read_pose_artifacts_benchmark(npz_file_path: Path) -> dict:
         runtime=data.get("runtime", None),
         keyframe_ids=data.get("keyframe_ids", None),
         frame_num=len(data["inds"]),
+    )
+
+
+def save_slam_intermediate_artifacts(out_path: ArtifactPath, slam_output, view_idx: int = 0) -> None:
+    n_frames = int(slam_output.trajectory.shape[0])
+    pose = slam_output.get_view_trajectory(view_idx).matrix().cpu().numpy()
+    if slam_output.per_frame_intrinsics:
+        intrinsics = slam_output.intrinsics[:, view_idx, :4].cpu().numpy()
+    else:
+        intrinsics = slam_output.intrinsics[view_idx, :4].cpu().numpy()
+
+    rig = slam_output.rig.matrix().cpu().numpy() if slam_output.rig is not None else np.eye(4, dtype=np.float32)[None]
+
+    path = out_path.slam_intermediate_path
+    path.parent.mkdir(exist_ok=True, parents=True)
+    np.savez(
+        path,
+        inds=np.arange(n_frames, dtype=np.int64),
+        pose=pose,
+        intrinsics=intrinsics,
+        rig=rig,
+        base_trajectory=slam_output.trajectory.matrix().cpu().numpy(),
+        view_idx=np.array(view_idx, dtype=np.int64),
+        per_frame_intrinsics=np.array(slam_output.per_frame_intrinsics, dtype=bool),
     )
 
 

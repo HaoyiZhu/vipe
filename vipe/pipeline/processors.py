@@ -15,15 +15,19 @@
 
 
 import logging
+import math
 from typing import Any, Iterable, Iterator, cast
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from scipy.spatial.transform import Rotation as R
 
 from vipe.ext.lietorch import SE3, SO3
 from vipe.priors.depth import DepthEstimationInput, make_depth_model
 from vipe.priors.depth.alignment import align_inv_depth_to_depth
+from vipe.priors.depth.moge_v2 import focal_length_to_fov_degrees
+from vipe.priors.depth.pi3x_moge import Pi3XMoGeV2Model, mask_aware_nearest_resize_robust
 from vipe.priors.depth.priorda import PriorDAModel
 from vipe.priors.depth.videodepthanything import VideoDepthAnythingDepthModel
 from vipe.priors.geocalib import GeoCalib
@@ -39,6 +43,11 @@ from vipe.utils.model_cache import ModelCache
 from vipe.utils.morph import erode
 
 logger = logging.getLogger(__name__)
+
+try:
+    from moge.utils.alignment import align_points_scale_z_shift
+except ModuleNotFoundError:
+    align_points_scale_z_shift = None
 
 
 class IntrinsicEstimationProcessor(StreamProcessor):
@@ -329,6 +338,381 @@ class AdaptiveDepthProcessor(StreamProcessor):
                 frame.metric_depth = prompt_result
 
             yield frame
+
+
+class Pi3XMoGePerFrameProcessor(StreamProcessor):
+    """Post depth using Pi3X video geometry aligned to MoGe2 or the SLAM map."""
+
+    def __init__(
+        self,
+        slam_output: SLAMOutput,
+        view_idx: int = 0,
+        window_size: int = 64,
+        overlap_size: int = 16,
+        pixel_limit: int = 255000,
+        align_lr_size: int = 64,
+        min_align_points: int = 200,
+        align_mode: str = "window_shared_ema",
+        align_momentum: float = 0.99,
+        scale_clamp: tuple[float, float] = (0.1, 10.0),
+        shift_z_clamp: tuple[float, float] = (-1e3, 1e3),
+        moge_bs: int = 4,
+        align_source: str = "slam_map",
+        max_window_align_points: int = 2000,
+        max_frame_align_points: int = 2000,
+    ) -> None:
+        super().__init__()
+        if align_points_scale_z_shift is None:
+            raise RuntimeError("MoGe alignment utilities are required for Pi3XMoGePerFrameProcessor.")
+        if align_source not in {"moge2", "slam_map"}:
+            raise ValueError(f"Unsupported Pi3X/MoGe2 alignment source: {align_source}")
+
+        self.slam_output = slam_output
+        self.view_idx = view_idx
+        self.window_size = max(1, min(int(window_size), 180))
+        self.overlap_size = max(0, min(int(overlap_size), self.window_size - 1))
+        self.pixel_limit = pixel_limit
+        self.align_lr_size = align_lr_size
+        self.min_align_points = min_align_points
+        self.align_mode = align_mode
+        self.align_momentum = align_momentum
+        self.scale_clamp = tuple(scale_clamp)
+        self.shift_z_clamp = tuple(shift_z_clamp)
+        self.moge_bs = max(1, int(moge_bs))
+        self.align_source = align_source
+        self.max_window_align_points = max(0, int(max_window_align_points))
+        self.max_frame_align_points = max(0, int(max_frame_align_points))
+        self._cache_scale: torch.Tensor | None = None
+
+        self.model = Pi3XMoGeV2Model(pixel_limit=pixel_limit)
+        self.pi3x = self.model.pi3x
+        self.moge = self.model.moge
+        self.n_passes_required = 1
+
+    def update_attributes(self, previous_attributes: set[FrameAttribute]) -> set[FrameAttribute]:
+        return previous_attributes | {FrameAttribute.METRIC_DEPTH}
+
+    def __call__(self, frame_idx: int, frame: VideoFrame) -> VideoFrame:
+        raise NotImplementedError("Pi3XMoGePerFrameProcessor should not be called directly.")
+
+    def _effective_align_size(self, base_size: int, max_points: int, multiplier: int = 1) -> int:
+        if max_points <= 0:
+            return base_size
+        max_points = max(1, int(max_points // max(1, multiplier)))
+        return min(base_size, max(4, int(math.sqrt(max_points))))
+
+    def _prepare_inputs(
+        self,
+        frames: list[VideoFrame],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int, int, int]:
+        orig_h, orig_w = frames[0].size()
+        target_h, target_w = self.model._get_resize_size(orig_h, orig_w)
+        target_h = max(14, ((target_h + 13) // 14) * 14)
+        target_w = max(14, ((target_w + 13) // 14) * 14)
+        while target_h * target_w > self.pixel_limit and (target_h > 14 or target_w > 14):
+            if target_h > target_w:
+                target_h -= 14
+            else:
+                target_w -= 14
+        scale_x = target_w / orig_w
+        scale_y = target_h / orig_h
+
+        imgs: list[torch.Tensor] = []
+        poses: list[torch.Tensor] = []
+        intrinsics: list[torch.Tensor] = []
+        for frame in frames:
+            image = frame.rgb.cuda().permute(2, 0, 1).unsqueeze(0)
+            image = F.interpolate(
+                image,
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+                antialias=True,
+            )
+            imgs.append(image)
+
+            poses.append(unpack_optional(frame.pose).matrix().detach().cpu())
+            fx, fy, cx, cy = unpack_optional(frame.intrinsics)[:4]
+            K = torch.eye(3)
+            K[0, 0] = fx.cpu() * scale_x
+            K[1, 1] = fy.cpu() * scale_y
+            K[0, 2] = cx.cpu() * scale_x
+            K[1, 2] = cy.cpu() * scale_y
+            intrinsics.append(K)
+
+        return (
+            torch.cat(imgs, dim=0).unsqueeze(0),
+            torch.stack(poses).cuda().unsqueeze(0),
+            torch.stack(intrinsics).cuda().unsqueeze(0),
+            target_h,
+            target_w,
+            orig_h,
+            orig_w,
+        )
+
+    def _depth_to_points(self, depth: torch.Tensor, K: torch.Tensor) -> torch.Tensor:
+        fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
+        h, w = depth.shape
+        yy, xx = torch.meshgrid(
+            torch.arange(h, device=depth.device, dtype=depth.dtype),
+            torch.arange(w, device=depth.device, dtype=depth.dtype),
+            indexing="ij",
+        )
+        z = depth
+        x = (xx - cx) / fx * z
+        y = (yy - cy) / fy * z
+        return torch.stack([x, y, z], dim=-1)
+
+    def _resize_mask(
+        self, frame: VideoFrame, target_size: tuple[int, int], device: torch.device
+    ) -> torch.Tensor | None:
+        if frame.mask is None:
+            return None
+        mask = frame.mask
+        if mask.dim() != 2:
+            mask = mask.squeeze()
+        if mask.shape != target_size:
+            mask = F.interpolate(mask.float()[None, None].to(device), size=target_size, mode="nearest")[0, 0].bool()
+        else:
+            mask = mask.to(device).bool()
+        return mask
+
+    def _slam_depth_for_frame(
+        self,
+        frame: VideoFrame,
+        frame_idx: int,
+        intrinsics: torch.Tensor,
+        target_size: tuple[int, int],
+        slam_device: torch.device,
+    ) -> torch.Tensor:
+        slam_map = unpack_optional(self.slam_output.slam_map)
+        pose = unpack_optional(frame.pose).to(slam_device)
+        K = intrinsics.to(slam_device)
+        intr = torch.stack([K[0, 0], K[1, 1], K[0, 2], K[1, 2]])
+        return slam_map.project_map(
+            frame_tstamp=frame_idx,
+            view_idx=self.view_idx,
+            target_size=target_size,
+            target_intrinsics=intr,
+            target_pose=pose,
+            target_camera_type=unpack_optional(frame.camera_type),
+            infill=False,
+        )
+
+    def _solve_scale(
+        self,
+        source_points: torch.Tensor,
+        target_points: torch.Tensor,
+        weights: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        try:
+            scale, shift = align_points_scale_z_shift(
+                source_points.unsqueeze(0),
+                target_points.unsqueeze(0),
+                weights.unsqueeze(0),
+            )
+        except Exception:
+            return None, None
+
+        scale_i = scale[0].clamp(self.scale_clamp[0], self.scale_clamp[1])
+        shiftz_i = shift[0, 2].clamp(self.shift_z_clamp[0], self.shift_z_clamp[1])
+        if torch.isfinite(scale_i).all() and torch.isfinite(shiftz_i).all() and scale_i.item() > 0:
+            return scale_i, shiftz_i
+        return None, None
+
+    @torch.no_grad()
+    def estimate_depth(self, previous_iterator: Iterator[VideoFrame]) -> Iterator[VideoFrame]:
+        all_frames = [frame.cpu() for frame in previous_iterator]
+        if not all_frames:
+            return
+        if self.align_source == "slam_map":
+            if self.slam_output.slam_map is None:
+                raise ValueError("align_source=slam_map requires slam_output.slam_map")
+            for frame in all_frames:
+                if frame.camera_type != CameraType.PINHOLE:
+                    raise ValueError("align_source=slam_map currently supports only pinhole cameras")
+            slam_device = self.slam_output.slam_map.dense_disp_xyz.device
+        else:
+            slam_device = torch.device("cuda")
+
+        current_window: list[VideoFrame] = []
+        current_indices: list[int] = []
+        trailing_depth: torch.Tensor | None = None
+
+        for frame_idx, frame in pbar(enumerate(all_frames), total=len(all_frames), desc="Pi3X+MoGe2 depth"):
+            current_window.append(frame)
+            current_indices.append(frame_idx)
+            is_last_frame = frame_idx == len(all_frames) - 1
+            if len(current_window) < self.window_size and not is_last_frame:
+                continue
+
+            imgs, _poses, intrinsics, target_h, target_w, orig_h, orig_w = self._prepare_inputs(current_window)
+
+            pi3x_out = self.pi3x(imgs)
+            pi3x_points = pi3x_out["local_points"][0][: len(current_window)]
+            pi3x_conf = torch.sigmoid(pi3x_out["conf"][0, : len(current_window), ..., 0]) > 0.1
+
+            moge_points = None
+            moge_mask = None
+            moge_depth: torch.Tensor | None = None
+            if self.align_source == "moge2":
+                imgs_moge = imgs[0]
+                n_window = imgs_moge.shape[0]
+                moge_points = torch.empty((n_window, target_h, target_w, 3), device=imgs_moge.device)
+                moge_mask = torch.empty((n_window, target_h, target_w), device=imgs_moge.device, dtype=torch.bool)
+                fov_x = focal_length_to_fov_degrees(unpack_optional(current_window[0].intrinsics)[0].item(), orig_w)
+                for start in range(0, n_window, self.moge_bs):
+                    out = self.moge.forward(imgs_moge[start : start + self.moge_bs], fov_x=fov_x)
+                    points = out["points"]
+                    moge_points[start : start + points.shape[0]] = points
+                    mask = out.get("mask", torch.ones_like(points[..., 0])).bool()
+                    if mask.dim() == 4:
+                        mask = mask.squeeze(1)
+                    moge_mask[start : start + mask.shape[0]] = mask
+                    if "depth" in out:
+                        if moge_depth is None:
+                            moge_depth = torch.empty(
+                                (n_window, target_h, target_w),
+                                device=imgs_moge.device,
+                                dtype=out["depth"].dtype,
+                            )
+                        moge_depth[start : start + out["depth"].shape[0]] = out["depth"]
+
+            window_scale: torch.Tensor | None = None
+            if self.align_mode in ("window_shared", "window_shared_ema"):
+                align_size = self._effective_align_size(
+                    self.align_lr_size, self.max_window_align_points, len(current_window)
+                )
+                src_parts: list[torch.Tensor] = []
+                tgt_parts: list[torch.Tensor] = []
+                weight_parts: list[torch.Tensor] = []
+                for i, window_frame in enumerate(current_window):
+                    if self.align_source == "slam_map":
+                        target_depth = self._slam_depth_for_frame(
+                            window_frame,
+                            current_indices[i],
+                            intrinsics[0, i],
+                            (target_h, target_w),
+                            slam_device,
+                        ).to(pi3x_points.device)
+                        target_mask = target_depth > 0
+                        resized_mask = self._resize_mask(window_frame, (target_h, target_w), target_depth.device)
+                        if resized_mask is not None:
+                            target_mask = target_mask & resized_mask
+                        combined_mask = pi3x_conf[i] & target_mask
+                        if combined_mask.sum().item() < self.min_align_points:
+                            continue
+                        indices, lr_mask = mask_aware_nearest_resize_robust(combined_mask, align_size, align_size)
+                        ni, nj = indices
+                        if lr_mask.sum().item() < 10:
+                            continue
+                        src_parts.append(pi3x_points[i][ni, nj][lr_mask])
+                        tgt_parts.append(self._depth_to_points(target_depth, intrinsics[0, i])[ni, nj][lr_mask])
+                        weight_parts.append(1.0 / target_depth[ni, nj][lr_mask].clamp(min=1e-3))
+                    else:
+                        assert moge_points is not None and moge_mask is not None
+                        combined_mask = pi3x_conf[i] & moge_mask[i]
+                        if combined_mask.sum().item() < self.min_align_points:
+                            continue
+                        indices, lr_mask = mask_aware_nearest_resize_robust(combined_mask, align_size, align_size)
+                        ni, nj = indices
+                        if lr_mask.sum().item() < 10:
+                            continue
+                        target_points = moge_points[i][ni, nj]
+                        src_parts.append(pi3x_points[i][ni, nj][lr_mask])
+                        tgt_parts.append(target_points[lr_mask])
+                        weight_parts.append(1.0 / target_points[..., 2][lr_mask].clamp(min=1e-3))
+
+                if src_parts:
+                    window_scale, _ = self._solve_scale(
+                        torch.cat(src_parts, dim=0),
+                        torch.cat(tgt_parts, dim=0),
+                        torch.cat(weight_parts, dim=0),
+                    )
+
+            window_depth = torch.zeros(
+                (len(current_window), orig_h, orig_w),
+                device=pi3x_points.device,
+                dtype=pi3x_points.dtype,
+            )
+            for i, window_frame in enumerate(current_window):
+                if self.align_source == "slam_map":
+                    target_depth = self._slam_depth_for_frame(
+                        window_frame,
+                        current_indices[i],
+                        intrinsics[0, i],
+                        (target_h, target_w),
+                        slam_device,
+                    ).to(pi3x_points.device)
+                    target_mask = target_depth > 0
+                    resized_mask = self._resize_mask(window_frame, (target_h, target_w), target_depth.device)
+                    if resized_mask is not None:
+                        target_mask = target_mask & resized_mask
+                    combined_mask = pi3x_conf[i] & target_mask
+                else:
+                    assert moge_points is not None and moge_mask is not None
+                    combined_mask = pi3x_conf[i] & moge_mask[i]
+
+                scale_i = window_scale
+                if scale_i is None and combined_mask.sum().item() >= self.min_align_points:
+                    align_size = self._effective_align_size(self.align_lr_size, self.max_frame_align_points, 1)
+                    indices, lr_mask = mask_aware_nearest_resize_robust(combined_mask, align_size, align_size)
+                    ni, nj = indices
+                    if lr_mask.sum().item() >= 10:
+                        src_points = pi3x_points[i][ni, nj]
+                        if self.align_source == "slam_map":
+                            target_points = self._depth_to_points(target_depth, intrinsics[0, i])[ni, nj]
+                            weights = 1.0 / target_depth[ni, nj].clamp(min=1e-3)
+                        else:
+                            assert moge_points is not None
+                            target_points = moge_points[i][ni, nj]
+                            weights = 1.0 / target_points[..., 2].clamp(min=1e-3)
+                        scale_i, _ = self._solve_scale(src_points[lr_mask], target_points[lr_mask], weights[lr_mask])
+
+                if self.align_mode in ("per_frame_ema", "window_shared_ema"):
+                    if scale_i is None:
+                        scale_i = self._cache_scale
+                    elif self._cache_scale is None:
+                        self._cache_scale = scale_i
+                    else:
+                        scale_i = self._cache_scale * self.align_momentum + scale_i * (1 - self.align_momentum)
+                        self._cache_scale = scale_i
+
+                if scale_i is None:
+                    if self.align_source == "moge2" and moge_depth is not None:
+                        depth = torch.nan_to_num(moge_depth[i], nan=0.0).clamp(min=0.0, max=1e4)
+                        depth = depth * pi3x_conf[i].float()
+                    else:
+                        depth = pi3x_points[i, ..., 2].clamp(min=0.0) * pi3x_conf[i].float()
+                else:
+                    depth = (pi3x_points[i, ..., 2] * scale_i).clamp(min=0.0) * pi3x_conf[i].float()
+
+                window_depth[i] = F.interpolate(
+                    depth.unsqueeze(0).unsqueeze(0),
+                    size=(orig_h, orig_w),
+                    mode="nearest",
+                )[0, 0]
+
+            n_yield = self.window_size - self.overlap_size if not is_last_frame else len(current_window)
+            if trailing_depth is not None:
+                n_interp = len(trailing_depth)
+                alpha = torch.linspace(0, 1, n_interp + 2, device=window_depth.device)[1:-1, None, None]
+                window_depth[:n_interp] = trailing_depth * (1 - alpha) + window_depth[:n_interp] * alpha
+
+            for i in range(n_yield):
+                current_window[i].metric_depth = window_depth[i].cpu()
+
+            trailing_depth = window_depth[n_yield:].detach()
+            current_window = current_window[n_yield:]
+            current_indices = current_indices[n_yield:]
+
+        for frame in all_frames:
+            yield frame.cuda()
+
+    def update_iterator(self, previous_iterator: Iterator[VideoFrame], pass_idx: int) -> Iterator[VideoFrame]:
+        if pass_idx != 0:
+            raise ValueError(f"Invalid pass index: {pass_idx}")
+        yield from self.estimate_depth(previous_iterator)
 
 
 class MultiviewDepthProcessor(StreamProcessor):

@@ -46,6 +46,8 @@ module = [
     "ffmpeg",
     "Imath",
     "OpenEXR",
+    "moge",
+    "moge.*",
     "pandas",
     "pandas.*",
     "scipy",

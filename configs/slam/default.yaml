@@ -27,6 +27,8 @@ backend_iters: 24
 init_disp: 1.0
 # Whether to optimize intrinsics
 optimize_intrinsics: ???
+# Whether to optimize separate intrinsics per frame instead of one value per view
+per_frame_intrinsics: false
 # Whether to optimize rig
 optimize_rig_rotation: false
 # Whether add reproj factors for cross-views
@@ -42,6 +44,8 @@ infill_dense_disp: False
 map_filter_thresh: 0.05
 # Whether to visualize the results using rerun
 visualize: false
+# Store normalized bundle-adjustment residuals on SLAMOutput for filtering/debugging
+compute_ba_residual: true
 # Use keyframe depth for recovering metric depth
 keyframe_depth: metric3d-small
 
